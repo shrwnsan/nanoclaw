@@ -15,6 +15,16 @@ systemctl --user restart nanoclaw
 git push origin dev --force
 ```
 
+After the rebase, re-disable any upstream workflows that require secrets:
+
+```bash
+for f in fork-sync-skills bump-version update-tokens merge-forward-skills; do
+  [ -f .github/workflows/$f.yml ] && git mv .github/workflows/$f.yml .github/workflows/$f.yml.disabled
+done
+```
+
+Commit if any were re-enabled by upstream, then push.
+
 ## Installed Skills
 
 - **Telegram** - merged from `telegram/main` remote (https://github.com/qwibitai/nanoclaw-telegram)
