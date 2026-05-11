@@ -432,8 +432,10 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
  * and dispatch each one to its resolved destination. Text outside of blocks
  * (including <internal>...</internal>) is scratchpad — logged but not sent.
  *
- * The agent must always wrap output in <message to="name">...</message>
- * blocks, even with a single destination. Bare text is scratchpad only.
+ * The agent should wrap output in <message to="name">...</message> blocks.
+ * If no blocks are found and there's exactly one destination, the bare text
+ * is sent there as a fallback (handles models that don't produce the format).
+ * Otherwise bare text is scratchpad — logged but not sent.
  */
 function dispatchResultText(text: string, routing: RoutingContext): void {
   const MESSAGE_RE = /<message\s+to="([^"]+)"\s*>([\s\S]*?)<\/message>/g;
@@ -471,7 +473,16 @@ function dispatchResultText(text: string, routing: RoutingContext): void {
   }
 
   if (sent === 0 && text.trim()) {
-    log(`WARNING: agent output had no <message to="..."> blocks — nothing was sent`);
+    // Bare-text fallback: if the model didn't produce <message> blocks but
+    // there's exactly one destination, send the scratchpad text there.
+    // This handles models that don't follow the XML message format.
+    const all = getAllDestinations();
+    if (all.length === 1) {
+      log(`No <message> blocks, single destination — sending bare text to "${all[0].name}"`);
+      sendToDestination(all[0], text.trim(), routing);
+    } else {
+      log(`WARNING: agent output had no <message to="..."> blocks — nothing was sent (${all.length} destinations)`);
+    }
   }
 }
 

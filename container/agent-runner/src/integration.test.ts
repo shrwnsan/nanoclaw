@@ -113,7 +113,7 @@ describe('poll loop integration', () => {
     await loopPromise.catch(() => {});
   });
 
-  it('bare text produces no outbound messages (scratchpad only)', async () => {
+  it('bare text with single destination is sent as fallback', async () => {
     insertMessage('m1', { sender: 'Alice', text: 'hello' }, { platformId: 'chan-1', channelType: 'discord' });
 
     // Agent responds with bare text — no <message to="..."> wrapping
@@ -126,7 +126,8 @@ describe('poll loop integration', () => {
     controller.abort();
 
     const out = getUndeliveredMessages();
-    expect(out).toHaveLength(0);
+    expect(out).toHaveLength(1);
+    expect(JSON.parse(out[0].content).text).toBe('I am thinking about this...');
 
     await loopPromise.catch(() => {});
   });
