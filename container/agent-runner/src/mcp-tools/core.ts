@@ -77,11 +77,9 @@ function resolveRouting(
   const dest = findByName(to);
   if (!dest) return { error: `Unknown destination "${to}". Known: ${destinationList()}` };
   if (dest.type === 'channel') {
-    // If the destination is the same channel the session is bound to,
-    // preserve the thread_id so replies land in the correct thread.
     const session = getSessionRouting();
-    const threadId =
-      session.channel_type === dest.channelType && session.platform_id === dest.platformId ? session.thread_id : null;
+    const isSameChannel = session.channel_type === dest.channelType && session.platform_id === dest.platformId;
+    const threadId = dest.threadId ?? (isSameChannel ? session.thread_id : null);
     return {
       channel_type: dest.channelType!,
       platform_id: dest.platformId!,

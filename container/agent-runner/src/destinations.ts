@@ -19,6 +19,7 @@ export interface DestinationEntry {
   channelType?: string;
   platformId?: string;
   agentGroupId?: string;
+  threadId?: string;
 }
 
 interface DestRow {
@@ -28,6 +29,7 @@ interface DestRow {
   channel_type: string | null;
   platform_id: string | null;
   agent_group_id: string | null;
+  thread_id: string | null;
 }
 
 function rowToEntry(row: DestRow): DestinationEntry {
@@ -38,6 +40,7 @@ function rowToEntry(row: DestRow): DestinationEntry {
     channelType: row.channel_type ?? undefined,
     platformId: row.platform_id ?? undefined,
     agentGroupId: row.agent_group_id ?? undefined,
+    threadId: row.thread_id ?? undefined,
   };
 }
 
@@ -115,10 +118,9 @@ function buildDestinationsSection(): string {
     }
   }
   lines.push('');
-  lines.push('**Every response must be wrapped** in a `<message to="name">...</message>` block.');
+  lines.push('**All output must be wrapped.** Use `<message to="name">...</message>` for content to send, or `<internal>...</internal>` for scratchpad.');
   lines.push('You can include multiple `<message>` blocks in one response to send to multiple destinations.');
-  lines.push('Text outside of `<message>` blocks is scratchpad — logged but not sent anywhere.');
-  lines.push('Use `<internal>...</internal>` to make scratchpad intent explicit.');
+  lines.push('Bare text (outside of `<message>` or `<internal>` blocks) is not allowed and will not be delivered.');
   lines.push('');
   lines.push(
     '**Default routing**: when replying to an incoming message, address the same destination the message came `from` — every inbound `<message>` tag carries a `from="name"` attribute that names the origin destination. Only address a different destination when the request itself asks you to (e.g., "tell Laura that…").',

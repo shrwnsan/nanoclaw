@@ -202,7 +202,8 @@ CREATE TABLE IF NOT EXISTS destinations (
   type            TEXT NOT NULL,   -- 'channel' | 'agent'
   channel_type    TEXT,            -- for type='channel'
   platform_id     TEXT,            -- for type='channel'
-  agent_group_id  TEXT             -- for type='agent'
+  agent_group_id  TEXT,            -- for type='agent'
+  thread_id       TEXT             -- optional platform-specific thread/topic override
 );
 
 -- Default reply routing for this session. Single-row table (id=1).

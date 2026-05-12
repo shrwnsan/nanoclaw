@@ -14,6 +14,17 @@ export function ensureSchema(dbPath: string, schema: 'inbound' | 'outbound'): vo
   const db = new Database(dbPath);
   db.pragma('journal_mode = DELETE');
   db.exec(schema === 'inbound' ? INBOUND_SCHEMA : OUTBOUND_SCHEMA);
+
+  // Session-level migrations — add columns that didn't exist in earlier
+  // schema versions.  These are no-ops when the column is already present.
+  if (schema === 'inbound') {
+    try {
+      db.exec(`ALTER TABLE destinations ADD COLUMN thread_id TEXT`);
+    } catch {
+      // column-already-exists — expected for fresh session DBs
+    }
+  }
+
   db.close();
 }
 
@@ -61,14 +72,15 @@ export interface DestinationRow {
   channel_type: string | null;
   platform_id: string | null;
   agent_group_id: string | null;
+  thread_id: string | null;
 }
 
 export function replaceDestinations(db: Database.Database, entries: DestinationRow[]): void {
   const tx = db.transaction((rows: DestinationRow[]) => {
     db.prepare('DELETE FROM destinations').run();
     const stmt = db.prepare(
-      `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
-       VALUES (@name, @display_name, @type, @channel_type, @platform_id, @agent_group_id)`,
+      `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id, thread_id)
+       VALUES (@name, @display_name, @type, @channel_type, @platform_id, @agent_group_id, @thread_id)`,
     );
     for (const row of rows) stmt.run(row);
   });
