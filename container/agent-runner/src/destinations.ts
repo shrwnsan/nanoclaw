@@ -19,6 +19,7 @@ export interface DestinationEntry {
   channelType?: string;
   platformId?: string;
   agentGroupId?: string;
+  threadId?: string;
 }
 
 interface DestRow {
@@ -28,6 +29,7 @@ interface DestRow {
   channel_type: string | null;
   platform_id: string | null;
   agent_group_id: string | null;
+  thread_id: string | null;
 }
 
 function rowToEntry(row: DestRow): DestinationEntry {
@@ -38,6 +40,7 @@ function rowToEntry(row: DestRow): DestinationEntry {
     channelType: row.channel_type ?? undefined,
     platformId: row.platform_id ?? undefined,
     agentGroupId: row.agent_group_id ?? undefined,
+    threadId: row.thread_id ?? undefined,
   };
 }
 
