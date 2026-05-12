@@ -474,9 +474,9 @@ function dispatchResultText(text: string, routing: RoutingContext): { sent: numb
     if (all.length === 1) {
       log(`No <message> blocks, single destination — sending bare text to "${all[0].name}"`);
       sendToDestination(all[0], text.trim(), routing);
-    } else {
-      log(`WARNING: agent output had no <message to="..."> blocks — nothing was sent (${all.length} destinations)`);
+      return { sent: 1, hasUnwrapped: false };
     }
+    log(`WARNING: agent output had no <message to="..."> blocks — nothing was sent (${all.length} destinations)`);
   }
   return { sent, hasUnwrapped };
 }
