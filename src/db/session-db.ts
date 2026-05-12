@@ -33,6 +33,12 @@ export function openInboundDb(dbPath: string): Database.Database {
   const db = new Database(dbPath);
   db.pragma('journal_mode = DELETE');
   db.pragma('busy_timeout = 5000');
+  // Forward-compat: ensure thread_id column exists on older session DBs
+  try {
+    db.exec(`ALTER TABLE destinations ADD COLUMN thread_id TEXT`);
+  } catch {
+    // column-already-exists — expected for already-migrated session DBs
+  }
   return db;
 }
 
