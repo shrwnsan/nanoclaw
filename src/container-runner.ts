@@ -53,6 +53,48 @@ const onecli = new OneCLI({ url: ONECLI_URL, apiKey: ONECLI_API_KEY });
 const activeContainers = new Map<string, { process: ChildProcess; containerName: string }>();
 
 /**
+ * In-flight image rebuild promise. Deduplicates concurrent ensureImageExists
+ * calls so two sessions waking simultaneously don't trigger parallel rebuilds.
+ */
+let rebuildPromise: Promise<void> | null = null;
+
+/**
+ * Ensure the container image exists before spawn. The weekly docker-prune
+ * timer removes images with no running container association; NanoClaw uses
+ * --rm so all containers can be dead simultaneously, leaving the image
+ * unprotected. Rebuilds from container/build.sh if missing.
+ */
+function ensureImageExists(imageTag: string): Promise<void> {
+  try {
+    execSync(`${CONTAINER_RUNTIME_BIN} image inspect ${imageTag}`, { stdio: 'pipe' });
+    return Promise.resolve();
+  } catch {}
+
+  if (!rebuildPromise) {
+    rebuildPromise = new Promise<void>((resolve) => {
+      // Double-check after acquiring the lock — another caller may have rebuilt.
+      try {
+        execSync(`${CONTAINER_RUNTIME_BIN} image inspect ${imageTag}`, { stdio: 'pipe' });
+        resolve();
+        return;
+      } catch {}
+
+      log.warn('Container image missing (likely pruned), rebuilding...', { imageTag });
+      try {
+        execSync(`${process.cwd()}/container/build.sh`, { stdio: 'pipe' });
+        log.info('Container image rebuilt', { imageTag });
+      } catch (err) {
+        log.error('Container image rebuild failed', { imageTag, err });
+      } finally {
+        rebuildPromise = null;
+      }
+      resolve();
+    });
+  }
+  return rebuildPromise;
+}
+
+/**
  * In-flight wake promises, keyed by session id. Deduplicates concurrent
  * `wakeContainer` calls while the first spawn is still mid-setup (async
  * buildContainerArgs, OneCLI gateway apply, etc.) — otherwise a second
@@ -106,6 +148,10 @@ export function wakeContainer(session: Session): Promise<boolean> {
 }
 
 async function spawnContainer(session: Session): Promise<void> {
+  // Self-heal: ensure container image exists before doing any spawn work.
+  const preliminaryImageTag = (getContainerConfig(session.agent_group_id)?.image_tag as string | undefined) || CONTAINER_IMAGE;
+  await ensureImageExists(preliminaryImageTag);
+
   const agentGroup = getAgentGroup(session.agent_group_id);
   if (!agentGroup) {
     log.error('Agent group not found', { agentGroupId: session.agent_group_id });
