@@ -6,6 +6,7 @@ import { touchHeartbeat } from '../db/connection.js';
 
 const SCRIPT_TIMEOUT_MS = 30_000;
 const SCRIPT_MAX_BUFFER = 1024 * 1024;
+const SCRIPT_RETRY_DELAY_MS = 3_000;
 
 export interface ScriptResult {
   wakeAgent: boolean;
@@ -102,11 +103,20 @@ export async function applyPreTaskScripts(messages: MessageInRow[]): Promise<Tas
 
     log(`running script for task ${msg.id}`);
     touchHeartbeat();
-    const result = await runScript(script, msg.id);
+    let result = await runScript(script, msg.id);
     touchHeartbeat();
 
+    // Retry once on transient failures (DNS timeout, network reset, etc.)
+    if (!result) {
+      log(`task ${msg.id} script failed, retrying in ${SCRIPT_RETRY_DELAY_MS / 1000}s`);
+      await new Promise((r) => setTimeout(r, SCRIPT_RETRY_DELAY_MS));
+      touchHeartbeat();
+      result = await runScript(script, msg.id);
+      touchHeartbeat();
+    }
+
     if (!result || !result.wakeAgent) {
-      const reason = result ? 'wakeAgent=false' : 'script error/no output';
+      const reason = result ? 'wakeAgent=false' : 'script error/no output (after retry)';
       log(`task ${msg.id} skipped: ${reason}`);
       skipped.push(msg.id);
       continue;
