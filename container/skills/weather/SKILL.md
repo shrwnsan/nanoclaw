@@ -1,140 +1,103 @@
 ---
-name: weather
-description: Get current weather and forecasts for any location. Use when users ask about weather conditions, forecast outlooks, temperature, humidity, rain chance, or location-based weather summaries. Primary support for Hong Kong via HKO API (free, no key needed).
+name: weather-skill
+description: Retrieves current weather and forecasts for user-specified locations and formats results for chat platforms. Use when users ask about weather conditions, forecast outlooks, AQHI or UV levels, or location-based weather summaries.
 ---
 
 # Weather Skill
 
-Fetch weather data from free public APIs and deliver formatted reports. No external dependencies — uses `fetch()` directly.
+Bun-native weather skill with 14 providers, auto-selection, and Telegram/WhatsApp/text formatters. Installed at `/app/skills/weather/`.
 
 ## Triggers
 
-- `weather [location]`, `weather forecast [location]`
-- `天氣`, `天気`, `날씨`
+- `weather [location]`
+- `weather forecast [location]`
+- `天氣` (Chinese for weather)
 
-## Quick Reference: HKO API (Hong Kong)
+## Usage
 
-No API key required. Two endpoints cover current + 9-day forecast:
+```
+@agent weather [location]
+@agent weather forecast [location]
+@agent weather forecast [location] --days 5
+```
 
-### Current Conditions
+### Examples
+
+- `@agent weather` - Current weather for default location (Hong Kong)
+- `@agent weather Tokyo` - Current weather for Tokyo
+- `@agent weather forecast` - 3-day forecast for default location
+- `@agent weather forecast --days 5` - 5-day forecast
+- `@agent 天氣` - Current weather in Chinese (defaults to HK)
+
+## Agent Execution
 
 ```bash
-curl -s "https://data.weather.gov.hk/weatherAPI/opendata/weather.php?dataType=rhrread&lang=en"
+# Current weather
+bun run /app/skills/weather/src/cli.ts --location "<location>"
+
+# Forecast
+bun run /app/skills/weather/src/cli.ts --location "<location>" --forecast --days 3
+
+# Telegram formatted (MarkdownV2 — ready to send)
+bun run /app/skills/weather/src/cli.ts --location "<location>" --format telegram
+
+# JSON (for programmatic use)
+bun run /app/skills/weather/src/cli.ts --location "<location>" --format json
 ```
 
-Returns: temperature, humidity, rainfall, warnings, typhoon info, UV index, icon codes.
+Default location is Hong Kong. Provider auto-selection picks the best source based on location. 10 of 14 providers work without any API key. Open-Meteo is the zero-config global fallback (priority 11).
 
-### 9-Day Forecast
+## Providers (14)
 
-```bash
-curl -s "https://data.weather.gov.hk/weatherAPI/opendata/weather.php?dataType=fnd&lang=en"
-```
+| Provider | Coverage | API Key | Priority |
+|----------|----------|---------|----------|
+| HKO | Hong Kong | Free | 1 |
+| SG NEA | Singapore | Free | 2 |
+| JMA | Japan | Free | 3 |
+| CWA | Taiwan | Required | 4 |
+| UK Met Office | UK | Required | 5 |
+| BOM | Australia | Free | 6 |
+| MetService | New Zealand | Free | 7 |
+| NWS | USA | Free | 7 |
+| BMKG | Indonesia | Free | 8 |
+| DWD (Bright Sky) | Germany | Free | 8 |
+| KMA | South Korea | Required | 9 |
+| TMD | Thailand | Required | 9 |
+| OpenWeatherMap | Global | Required | 10 |
+| Open-Meteo | Global | Free | 11 (fallback) |
 
-Returns: daily forecasts with high/low temp, weather description, wind, rain probability (PSR).
+## Output Formats
 
-### Example: Fetch with `fetch()`
-
-```javascript
-const HKO = 'https://data.weather.gov.hk/weatherAPI/opendata/weather.php';
-
-async function hko(type) {
-  const r = await fetch(`${HKO}?dataType=${type}&lang=en`);
-  return r.json();
-}
-
-const [current, forecast] = await Promise.all([hko('rhrread'), hko('fnd')]);
-
-// Current temp
-const temp = current.temperature?.data?.find(d => d.place === "Hong Kong Observatory")
-  || current.temperature?.data?.[0];
-// Today's forecast
-const today = forecast.weatherForecast?.[0];
-```
-
-### Key Data Fields
-
-| Field | Path | Example |
-|-------|------|---------|
-| Temperature | `temperature.data[].value` | `26` (°C) |
-| Humidity | `humidity.data[0].value` | `80` (%) |
-| Weather icon | `icon[0]` | `51` (see icon table) |
-| Warnings | `warningMessage` | `""` or storm text |
-| Typhoon | `tcmessage` | `""` or TC info |
-| Forecast date | `weatherForecast[].forecastDate` | `"20260512"` |
-| High/Low | `forecastMaxtemp.value` / `forecastMintemp.value` | `28` / `23` |
-| Rain chance | `PSR` | `"High"` / `"Medium-Low"` |
-| Wind | `forecastWind` | `"South force 3"` |
-
-### HKO Icon Codes (common)
-
-| Code | Meaning | Code | Meaning |
-|------|---------|------|---------|
-| 50-52 | Sunny / Mainly sunny | 61-63 | Cloudy / Overcast |
-| 53-54 | Sunny periods / Sunny intervals | 64-65 | Rain / Thunderstorm |
-| 70-76 | Night clear / Night cloudy | 80-90 | Wind / Fog / Haze |
-
-### Output Format (for chat)
+### Telegram (MarkdownV2)
 
 ```
-Hong Kong Weather — Tuesday, May 12
+⛅ Hong Kong Weather — Tuesday, Mar 31
 
-26°C (feels 26°C) | High 28° / Low 23°
-Partly Cloudy
-Humidity: 80% | Wind: South force 3
-Rain: 60% | AQHI: 5 (Moderate)
-UV: 7 (High)
-Warnings: None
+🌡️ 26°C (feels 26°C) • High 28° / Low 23°
+⛅ Partly Cloudy
+💧 Humidity: 80% | 💨 Wind: South force 3
+🌧️ Rain: 60% | 🌫️ AQHI: 5 (Moderate)
+☀️ UV: 7 (High)
 ```
 
-For forecasts, list each day on a separate line:
+### CLI (Text)
 
 ```
-3-Day Forecast for Hong Kong
-
-Wed 5/13: Sunny Periods, 24-29°C, Rain: Low
-Thu 5/14: Cloudy, 23-27°C, Rain: Medium-High
-Fri 5/15: Thunderstorm, 22-25°C, Rain: High
+🌤️ Weather for Hong Kong
+🌡️ Temperature: 26°C
+💧 Humidity: 80%
+📍 Provider: hko
 ```
 
-## Other Providers
+## Parse User Input
 
-| Provider | Coverage | Key Needed | Endpoint |
-|----------|----------|------------|----------|
-| HKO | Hong Kong | No | `data.weather.gov.hk/weatherAPI/opendata/weather.php` |
-| Open-Meteo | Global | No | `api.open-meteo.com/v1/forecast` |
-| NWS | USA | No | `api.weather.gov` |
-| JMA | Japan | No | `www.jma.go.jp/bosai/forecast` |
-
-### Open-Meteo (Global, free, no key)
-
-Use for locations outside HKO coverage:
-
-```javascript
-// Example: Tokyo
-const r = await fetch(
-  'https://api.open-meteo.com/v1/forecast?' +
-  'latitude=35.6762&longitude=139.6503&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m' +
-  '&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=auto&forecast_days=3'
-);
-const data = await r.json();
-```
-
-WMO weather codes: 0=clear, 1-3=mainly clear to overcast, 45/48=fog, 51-55=drizzle, 61-65=rain, 71-75=snow, 80-82=showers, 95=thunderstorm.
-
-## Agent Behavior
-
-1. Detect location from message (default: Hong Kong if user is in HKT timezone)
-2. For HK locations, use HKO API (free, most detailed)
-3. For other locations, use Open-Meteo (free, global)
-4. Format output based on platform (plain text for most, Telegram supports emoji)
-5. For scheduled weather briefings, keep the message concise — under 500 chars
+1. Extract location from user message (default: Hong Kong if user is in HKT timezone)
+2. Detect if forecast is requested (keywords: "forecast", "預報", "未來幾天")
+3. Parse number of days if specified (default: 3, max: 9 for HKO)
+4. Run the appropriate CLI command and return output to user
 
 ## Safety
 
 - Read-only: fetch weather data, never modify anything
 - No API keys stored or transmitted for free providers
 - Do not prompt user to sign up for paid services when free alternatives exist
-
-## Reference
-
-Full Python implementation with 13 providers, Telegram/WhatsApp formatters, and sender integrations: `references/python-source/`

@@ -1,0 +1,16 @@
+{
+  "clear skies": "sunny",
+  "partly cloudy": "partly_cloudy",
+  "mostly cloudy": "cloudy",
+  "overcast": "overcast",
+  "haze": "mist",
+  "smoke": "mist",
+  "fog": "fog",
+  "light rain": "drizzle",
+  "rain": "rain",
+  "moderate rain": "rain",
+  "heavy rain": "heavy_rain",
+  "isolated shower": "showers",
+  "severe thunderstorm": "thunderstorm",
+  "thunderstorm": "thunderstorm"
+}

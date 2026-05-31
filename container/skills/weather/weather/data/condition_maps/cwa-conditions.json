@@ -1,0 +1,22 @@
+{
+  "晴": "sunny",
+  "晴時多雲": "partly_cloudy",
+  "多雲": "cloudy",
+  "多雲時晴": "partly_cloudy",
+  "多雲時陰": "cloudy",
+  "多雲短暫雨": "rain",
+  "陰": "overcast",
+  "陰時多雲": "cloudy",
+  "陰天": "overcast",
+  "陰有雨": "rain",
+  "陰短暫雨": "rain",
+  "短暫雨": "showers",
+  "短暫陣雨": "showers",
+  "有雨": "rain",
+  "陣雨": "showers",
+  "雷陣雨": "thunderstorm",
+  "大雨": "heavy_rain",
+  "豪雨": "heavy_rain",
+  "大豪雨": "heavy_rain",
+  "霧": "fog"
+}

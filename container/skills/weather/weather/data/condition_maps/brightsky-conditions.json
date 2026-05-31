@@ -1,0 +1,15 @@
+{
+  "clear-day": "sunny",
+  "clear-night": "clear",
+  "partly-cloudy-day": "partly_cloudy",
+  "partly-cloudy-night": "partly_cloudy",
+  "cloudy": "cloudy",
+  "fog": "fog",
+  "wind": "windy",
+  "rain": "rain",
+  "sleet": "sleet",
+  "snow": "snow",
+  "hail": "hail",
+  "thunderstorm": "thunderstorm",
+  "dry": "sunny"
+}

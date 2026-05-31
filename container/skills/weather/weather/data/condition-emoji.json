@@ -1,0 +1,22 @@
+{
+  "clear": "☀️",
+  "sunny": "☀️",
+  "partly_cloudy": "⛅",
+  "cloudy": "☁️",
+  "overcast": "☁️",
+  "fog": "🌫️",
+  "mist": "🌫️",
+  "drizzle": "🌦️",
+  "rain": "🌧️",
+  "showers": "🌦️",
+  "heavy_rain": "⛈️",
+  "thunderstorm": "⛈️",
+  "snow": "🌨️",
+  "heavy_snow": "❄️",
+  "sleet": "🌨️",
+  "hail": "🌨️",
+  "windy": "💨",
+  "hot": "🥵",
+  "cold": "🥶",
+  "unknown": "❓"
+}

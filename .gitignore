@@ -9,6 +9,7 @@ dist/
 # Local data & auth
 store/
 data/
+!container/skills/weather/weather/data/
 logs/
 
 # Groups - per-installation state, not tracked
