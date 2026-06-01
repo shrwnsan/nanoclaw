@@ -30,7 +30,7 @@ const BASE_URL = "https://api.open-meteo.com/v1/forecast";
 const CURRENT_PARAMS =
   "temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m,apparent_temperature";
 const DAILY_PARAMS =
-  "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,sunrise,sunset";
+  "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,sunrise,sunset,uv_index_max";
 const HAS_TIMEZONE_SUFFIX = /(?:Z|[+-]\d{2}:?\d{2})$/;
 
 export class OpenMeteoProvider implements IWeatherProvider {
@@ -154,6 +154,12 @@ export class OpenMeteoProvider implements IWeatherProvider {
         ? daily.precipitation_probability_max[0]
         : undefined;
 
+    const uvIndex =
+      Array.isArray(daily.uv_index_max) &&
+      typeof daily.uv_index_max[0] === "number"
+        ? daily.uv_index_max[0]
+        : undefined;
+
     const sunrise =
       Array.isArray(daily.sunrise) && typeof daily.sunrise[0] === "string"
         ? daily.sunrise[0]
@@ -186,6 +192,7 @@ export class OpenMeteoProvider implements IWeatherProvider {
       ...(tempHigh != null ? { temp_high: tempHigh } : {}),
       ...(tempLow != null ? { temp_low: tempLow } : {}),
       ...(precipChance != null ? { precipitation_chance: precipChance } : {}),
+      ...(uvIndex != null ? { uv_index: uvIndex } : {}),
       ...(sunrise ? { sunrise } : {}),
       ...(sunset ? { sunset } : {}),
     });
@@ -212,6 +219,9 @@ export class OpenMeteoProvider implements IWeatherProvider {
     )
       ? daily.precipitation_probability_max
       : [];
+    const uvIndices: number[] = Array.isArray(daily.uv_index_max)
+      ? daily.uv_index_max
+      : [];
     const sunrises: string[] = Array.isArray(daily.sunrise)
       ? daily.sunrise
       : [];
@@ -236,6 +246,7 @@ export class OpenMeteoProvider implements IWeatherProvider {
         ...(typeof precipChances[i] === "number"
           ? { precipitation_chance: precipChances[i] }
           : {}),
+        ...(typeof uvIndices[i] === "number" ? { uv_index: uvIndices[i] } : {}),
         ...(typeof sunrises[i] === "string" ? { sunrise: sunrises[i] } : {}),
         ...(typeof sunsets[i] === "string" ? { sunset: sunsets[i] } : {}),
       });

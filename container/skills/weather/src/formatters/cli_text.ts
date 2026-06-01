@@ -22,6 +22,8 @@ import {
   formatIsoDate,
   formatTempBare,
   formatTempC,
+  formatUv,
+  uvDescription,
 } from "../utils.js";
 import { BaseFormatter } from "./base.js";
 
@@ -61,7 +63,9 @@ export class CliTextFormatter extends BaseFormatter {
     }
 
     if (data.uv_index != null) {
-      lines.push(`☀️ UV Index: ${data.uv_index}`);
+      lines.push(
+        `☀️ UV Index: ${formatUv(data.uv_index)} (${uvDescription(data.uv_index)})`,
+      );
     }
 
     if (data.aqhi != null) {
