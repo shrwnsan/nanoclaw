@@ -1,6 +1,6 @@
 {
   "name": "@shrwnsan/weather-skill",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "A platform-agnostic weather skill for AI agents (Bun/TypeScript runtime).",
   "type": "module",
   "engines": {

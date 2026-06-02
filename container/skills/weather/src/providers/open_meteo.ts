@@ -162,11 +162,11 @@ export class OpenMeteoProvider implements IWeatherProvider {
 
     const sunrise =
       Array.isArray(daily.sunrise) && typeof daily.sunrise[0] === "string"
-        ? daily.sunrise[0]
+        ? formatTime(daily.sunrise[0])
         : undefined;
     const sunset =
       Array.isArray(daily.sunset) && typeof daily.sunset[0] === "string"
-        ? daily.sunset[0]
+        ? formatTime(daily.sunset[0])
         : undefined;
 
     return makeWeatherData({
@@ -247,8 +247,8 @@ export class OpenMeteoProvider implements IWeatherProvider {
           ? { precipitation_chance: precipChances[i] }
           : {}),
         ...(typeof uvIndices[i] === "number" ? { uv_index: uvIndices[i] } : {}),
-        ...(typeof sunrises[i] === "string" ? { sunrise: sunrises[i] } : {}),
-        ...(typeof sunsets[i] === "string" ? { sunset: sunsets[i] } : {}),
+        ...(typeof sunrises[i] === "string" ? { sunrise: formatTime(sunrises[i]) } : {}),
+        ...(typeof sunsets[i] === "string" ? { sunset: formatTime(sunsets[i]) } : {}),
       });
     });
   }
@@ -268,4 +268,13 @@ function titleCase(s: string): string {
     .split(/[\s_-]+/)
     .map((w) => (w ? w[0]!.toUpperCase() + w.slice(1) : w))
     .join(" ");
+}
+
+/**
+ * Extract HH:MM from an ISO 8601 timestamp string.
+ * "2026-01-01T06:52" → "06:52"
+ */
+function formatTime(iso: string): string {
+  const m = iso.match(/(\d{2}:\d{2})/);
+  return m ? m[1]! : iso;
 }
