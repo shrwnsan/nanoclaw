@@ -49,9 +49,9 @@ qmd mcp stop                # Stop daemon
 
 ## Tools
 
-### structured_search
+### query
 
-Search with pre-expanded queries.
+Hybrid search (renamed from `structured_search` in v2.5.3).
 
 ```json
 {
@@ -74,11 +74,11 @@ Search with pre-expanded queries.
 
 ### get
 
-Retrieve document by path or `#docid`.
+Retrieve document by file path or `#docid`.
 
 | Param | Type | Description |
 |-------|------|-------------|
-| `path` | string | File path or `#docid` |
+| `file` | string | File path or `#docid` |
 | `full` | bool? | Return full content |
 | `lineNumbers` | bool? | Add line numbers |
 
