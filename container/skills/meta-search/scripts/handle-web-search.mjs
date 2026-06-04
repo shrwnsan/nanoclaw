@@ -132,65 +132,61 @@ export async function handleWebSearch(params) {
 /**
  * Hybrid web search with intelligent service selection
  * Sequential: Tavily → Brave → Exa → Jina Search
+ *
+ * Each service is always attempted. If the env var is set, auth is sent explicitly.
+ * If not, the request goes without auth — the OneCLI proxy injects credentials.
  */
 export async function performHybridSearch(params, timeoutMs = 10000) {
   // Phase 1: Try Tavily API (premium, best RAG integration)
-  if (TAVILY_API_KEY) {
-    try {
-      console.log('🚀 Trying Tavily API...');
-      const startTime = Date.now();
-      const rawResult = await tavily.search(params, timeoutMs);
-      const responseTime = Date.now() - startTime;
+  try {
+    console.log('🚀 Trying Tavily API...');
+    const startTime = Date.now();
+    const rawResult = await tavily.search(params, timeoutMs);
+    const responseTime = Date.now() - startTime;
 
-      const standardizedResult = transformToStandard('tavily', rawResult, params.query, responseTime);
-      return { data: standardizedResult, service: 'tavily' };
-    } catch (error) {
-      console.log('🔄 Tavily failed, trying Brave Search...');
-    }
+    const standardizedResult = transformToStandard('tavily', rawResult, params.query, responseTime);
+    return { data: standardizedResult, service: 'tavily' };
+  } catch (error) {
+    console.log('🔄 Tavily failed, trying Brave Search...');
   }
 
   // Phase 2: Try Brave Search API (independent index, fastest)
-  if (BRAVE_API_KEY) {
-    try {
-      console.log('🦁 Trying Brave Search...');
-      const result = await tryBraveSearch(params, timeoutMs);
-      console.log('✅ Success with Brave Search');
-      return result;
-    } catch (error) {
-      console.log(`❌ Brave Search failed: ${error.message}`);
-    }
+  try {
+    console.log('🦁 Trying Brave Search...');
+    const result = await tryBraveSearch(params, timeoutMs);
+    console.log('✅ Success with Brave Search');
+    return result;
+  } catch (error) {
+    console.log(`❌ Brave Search failed: ${error.message}`);
   }
 
   // Phase 3: Try Exa AI (semantic/neural search)
-  if (EXA_API_KEY) {
-    try {
-      console.log('🔬 Trying Exa Search...');
-      const result = await tryExaSearch(params, timeoutMs);
-      console.log('✅ Success with Exa Search');
-      return result;
-    } catch (error) {
-      console.log(`❌ Exa Search failed: ${error.message}`);
-    }
+  try {
+    console.log('🔬 Trying Exa Search...');
+    const result = await tryExaSearch(params, timeoutMs);
+    console.log('✅ Success with Exa Search');
+    return result;
+  } catch (error) {
+    console.log(`❌ Exa Search failed: ${error.message}`);
   }
 
   // Phase 4: Try Jina Search API (last resort)
-  if (JINA_API_KEY) {
-    try {
-      console.log('🔍 Trying Jina Search (s.jina.ai)...');
-      const result = await tryJinaSearch(params, timeoutMs);
-      console.log('✅ Success with Jina Search');
-      return result;
-    } catch (error) {
-      console.log(`❌ Jina Search failed: ${error.message}`);
-    }
+  try {
+    console.log('🔍 Trying Jina Search (s.jina.ai)...');
+    const result = await tryJinaSearch(params, timeoutMs);
+    console.log('✅ Success with Jina Search');
+    return result;
+  } catch (error) {
+    console.log(`❌ Jina Search failed: ${error.message}`);
   }
 
   throw new Error(
-    'All search services failed. Configure at least one API key:\n' +
+    'All search services failed. Configure at least one API key or OneCLI proxy secret:\n' +
     '  • SEARCH_PLUS_TAVILY_API_KEY (recommended, 1000 free searches/month at tavily.com)\n' +
     '  • SEARCH_PLUS_BRAVE_API_KEY ($5 free credits/month at brave.com/search/api)\n' +
     '  • SEARCH_PLUS_EXA_API_KEY (1000 free searches/month at exa.ai)\n' +
     '  • SEARCH_PLUS_JINA_API_KEY (10M free tokens at jina.ai)\n' +
+    '  • Or add Generic Secrets in OneCLI dashboard for any of the above\n' +
     'See: https://github.com/shrwnsan/vibekit-claude-plugins/tree/main/plugins/search-plus#setup-options'
   );
 }
@@ -200,23 +196,23 @@ export async function performHybridSearch(params, timeoutMs = 10000) {
  * Requires SEARCH_PLUS_JINA_API_KEY
  */
 async function tryJinaSearch(params, timeoutMs = 10000) {
-  if (!JINA_API_KEY) {
-    throw new Error('Jina API key not configured');
-  }
-
   const query = encodeURIComponent(params.query);
   const maxResults = params.maxResults || 5;
 
   const startTime = Date.now();
   const searchUrl = `https://s.jina.ai/${query}`;
 
+  const headers = {
+    'Accept': 'application/json',
+    'X-Retain-Images': 'none',
+  };
+  if (JINA_API_KEY) {
+    headers['Authorization'] = `Bearer ${JINA_API_KEY}`;
+  }
+
   const response = await fetch(searchUrl, {
     method: 'GET',
-    headers: {
-      'Accept': 'application/json',
-      'Authorization': `Bearer ${JINA_API_KEY}`,
-      'X-Retain-Images': 'none',
-    },
+    headers,
     signal: AbortSignal.timeout(timeoutMs)
   });
 
@@ -250,23 +246,23 @@ async function tryJinaSearch(params, timeoutMs = 10000) {
  * Requires SEARCH_PLUS_BRAVE_API_KEY
  */
 async function tryBraveSearch(params, timeoutMs = 10000) {
-  if (!BRAVE_API_KEY) {
-    throw new Error('Brave API key not configured');
-  }
-
   const query = encodeURIComponent(params.query);
   const maxResults = Math.min(params.maxResults || 5, 20);
 
   const startTime = Date.now();
   const searchUrl = `https://api.search.brave.com/res/v1/web/search?q=${query}&count=${maxResults}`;
 
+  const headers = {
+    'Accept': 'application/json',
+    'Accept-Encoding': 'gzip',
+  };
+  if (BRAVE_API_KEY) {
+    headers['X-Subscription-Token'] = BRAVE_API_KEY;
+  }
+
   const response = await fetch(searchUrl, {
     method: 'GET',
-    headers: {
-      'Accept': 'application/json',
-      'Accept-Encoding': 'gzip',
-      'X-Subscription-Token': BRAVE_API_KEY,
-    },
+    headers,
     signal: AbortSignal.timeout(timeoutMs)
   });
 
@@ -301,20 +297,20 @@ async function tryBraveSearch(params, timeoutMs = 10000) {
  * Requires SEARCH_PLUS_EXA_API_KEY
  */
 async function tryExaSearch(params, timeoutMs = 10000) {
-  if (!EXA_API_KEY) {
-    throw new Error('Exa API key not configured');
-  }
-
   const maxResults = params.maxResults || 5;
 
   const startTime = Date.now();
 
+  const headers = {
+    'Content-Type': 'application/json',
+  };
+  if (EXA_API_KEY) {
+    headers['x-api-key'] = EXA_API_KEY;
+  }
+
   const response = await fetch('https://api.exa.ai/search', {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': EXA_API_KEY,
-    },
+    headers,
     body: JSON.stringify({
       query: params.query,
       numResults: maxResults,
