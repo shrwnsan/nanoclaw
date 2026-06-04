@@ -1,7 +1,7 @@
 ---
 name: qmd
 description: Search markdown knowledge bases and documentation using QMD. Use when users ask to search notes, find documents, look up past research, or query indexed knowledge. Provides hybrid search (BM25 + vector + rerank) across all configured collections.
-compatibility: QMD MCP server running on host at host.docker.internal:8181. Accessible from all NanoClaw containers.
+compatibility: QMD v2.5.3 MCP server running on host at host.docker.internal:8181. Accessible from all NanoClaw containers.
 ---
 
 # QMD — Quick Markdown Search
@@ -10,11 +10,10 @@ Local hybrid search engine (BM25 + vector + deep rerank) for markdown content. R
 
 ## Status
 
-QMD runs on the same host as NanoClaw (oci-prime). It's always available — no service trigger needed.
+QMD runs on the same host as NanoClaw. It's always available — no service trigger needed.
 
 ```
 Host: http://host.docker.internal:8181/mcp
-Collections: telegram_main, claw-squad
 ```
 
 ## Searching via HTTP API
@@ -26,7 +25,7 @@ curl -s -X POST http://host.docker.internal:8181/mcp \
     "jsonrpc": "2.0",
     "method": "tools/call",
     "params": {
-      "name": "structured_search",
+      "name": "query",
       "arguments": {
         "searches": [
           { "type": "lex", "query": "VPS pricing" },
@@ -67,9 +66,11 @@ First query gets 2x weight in fusion — put your best guess first.
 
 ### Collection filtering
 
+Use the `status` tool to discover available collections. Then filter:
+
 ```json
-{ "collections": ["telegram_main"] }        // Single
-{ "collections": ["telegram_main", "claw-squad"] }  // Multiple (OR)
+{ "collections": ["collection_name"] }           // Single
+{ "collections": ["alpha", "beta"] }             // Multiple (OR)
 ```
 
 Omit `collections` to search all.
@@ -87,9 +88,10 @@ Omit `collections` to search all.
 
 | Tool | Purpose |
 |------|---------|
-| `get` | Retrieve doc by path or `#docid` |
+| `get` | Retrieve doc by `file` param (path or `#docid`). Line numbers default ON. |
 | `multi_get` | Retrieve multiple by glob pattern |
 | `status` | Collections and index health |
+| `query` | Hybrid search (renamed from `structured_search` in v2.5.3) |
 
 ### get example
 
@@ -97,7 +99,16 @@ Omit `collections` to search all.
 # By docid
 curl -s -X POST http://host.docker.internal:8181/mcp \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get","arguments":{"path":"#abc123","full":true}},"id":1}'
+  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get","arguments":{"file":"#abc123","full":true}},"id":1}'
+```
+
+### get with line range (v2.5.3)
+
+```bash
+# First 10 lines of a document
+curl -s -X POST http://host.docker.internal:8181/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"get","arguments":{"file":"#abc123:1:10"}},"id":1}'
 ```
 
 ### multi_get example
@@ -111,12 +122,7 @@ curl -s -X POST http://host.docker.internal:8181/mcp \
 
 ## Collections
 
-| Collection | Source | Content |
-|------------|--------|---------|
-| `telegram_main` | `groups/telegram_main/` | Docs, research, notes from the main agent |
-| `claw-squad` | `groups/telegram_claw-squad/` | Docs from My Claw Squad agent |
-
-Index is rebuilt daily via cron (`qmd update && qmd embed`). Searches work against the existing index — no manual updates needed.
+Use the `status` tool to discover available collections and index health. Filter searches with `collections: ["name"]` to target specific ones. Index is rebuilt daily — searches work against the existing index with no manual updates needed.
 
 ## How it works
 
