@@ -227,22 +227,23 @@ function isProblematicDomain(url) {
 }
 
 /**
- * Validates Tavily API key with a simple test call
+ * Validates Tavily API key with a simple test call.
+ * If TAVILY_API_KEY env var exists, sends Bearer header + api_key in body.
+ * If not, sends no auth — relies on proxy (OneCLI) to inject credentials.
  */
 async function validateTavilyAPIKey() {
-  if (!TAVILY_API_KEY) {
-    return { valid: false, reason: 'API key not configured' };
-  }
-
   try {
+    const headers = { 'Content-Type': 'application/json' };
+    const body = { query: 'test', max_results: 1 };
+    if (TAVILY_API_KEY) {
+      headers['Authorization'] = `Bearer ${TAVILY_API_KEY}`;
+      body.api_key = TAVILY_API_KEY;
+    }
+
     const testResponse = await fetch('https://api.tavily.com/search', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        api_key: TAVILY_API_KEY,
-        query: 'test',
-        max_results: 1
-      }),
+      headers,
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(5000)
     });
 
@@ -264,19 +265,19 @@ async function validateTavilyAPIKey() {
 }
 
 /**
- * Extracts content using Tavily Extract API
+ * Extracts content using Tavily Extract API.
+ * If TAVILY_API_KEY env var is set, sends Bearer header + api_key in body.
+ * If not set, sends no auth — relies on proxy (OneCLI) to inject credentials.
  */
 async function extractWithTavily(url, options = {}, timeoutMs = 15000) {
   const startTime = Date.now();
 
-  if (!TAVILY_API_KEY) {
-    throw new Error('Tavily API key not configured');
-  }
-
   const requestBody = {
-    api_key: TAVILY_API_KEY,
     urls: [url.trim()]
   };
+  if (TAVILY_API_KEY) {
+    requestBody.api_key = TAVILY_API_KEY;
+  }
 
   // Add optional parameters
   if (options.includeImages) requestBody.include_images = options.includeImages;
@@ -286,12 +287,17 @@ async function extractWithTavily(url, options = {}, timeoutMs = 15000) {
     const controller = new AbortController();
     const timeoutId = setTimeout(timeoutMs, null).then(() => controller.abort());
 
+    const headers = {
+      'Content-Type': 'application/json',
+      ...options.headers
+    };
+    if (TAVILY_API_KEY) {
+      headers['Authorization'] = `Bearer ${TAVILY_API_KEY}`;
+    }
+
     const response = await fetch(TAVILY_EXTRACT_URL, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...options.headers
-      },
+      headers,
       body: JSON.stringify(requestBody),
       signal: controller.signal
     });
@@ -401,24 +407,26 @@ async function extractWithJinaPublic(url, options = {}, timeoutMs = 10000) {
 }
 
 /**
- * Extracts content using Jina.ai API (provides enhanced metadata and reliability)
+ * Extracts content using Jina.ai API (provides enhanced metadata and reliability).
+ * If JINA_API_KEY env var is set, sends Bearer header.
+ * If not, sends no auth — relies on proxy (OneCLI) to inject credentials.
  */
 async function extractWithJinaAPI(url, options = {}, timeoutMs = 10000) {
   const startTime = Date.now();
 
-  if (!JINA_API_KEY) {
-    throw new Error('Jina.ai API key not configured');
-  }
-
   try {
+    const headers = {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+      ...options.headers
+    };
+    if (JINA_API_KEY) {
+      headers['Authorization'] = `Bearer ${JINA_API_KEY}`;
+    }
+
     const response = await fetch(JINA_READER_API_URL, {
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${JINA_API_KEY}`,
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-        ...options.headers
-      },
+      headers,
       body: JSON.stringify({
         url: url,
         ...options.jinaOptions
@@ -1580,25 +1588,26 @@ export const tavily = {
   search: async function tavilySearch(params, timeoutMs = 15000) {
     const startTime = Date.now();
 
-    if (!TAVILY_API_KEY) {
-    throw new Error('Tavily API key not configured');
-  }
-
   // Construct the request payload
   const requestBody = {
-    api_key: TAVILY_API_KEY,
     query: params.query,
     max_results: params.maxResults || 5,
     include_answer: params.includeAnswer !== false, // Default to true
     include_raw_content: params.includeRawContent || false,
     num_days: params.numDays || 30, // Look back 30 days by default
   };
+  if (TAVILY_API_KEY) {
+    requestBody.api_key = TAVILY_API_KEY;
+  }
 
   // Add headers if provided
   const headers = {
     'Content-Type': 'application/json',
     ...params.headers
   };
+  if (TAVILY_API_KEY) {
+    headers['Authorization'] = `Bearer ${TAVILY_API_KEY}`;
+  }
 
   try {
     // Create AbortController for timeout handling
