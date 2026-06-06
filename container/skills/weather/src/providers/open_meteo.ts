@@ -55,7 +55,7 @@ export class OpenMeteoProvider implements IWeatherProvider {
       current: CURRENT_PARAMS,
       daily: DAILY_PARAMS,
       forecast_days: "1",
-      timezone: "UTC",
+      timezone: "auto",
     });
     const data = await this.fetchJson(url);
     return this.parseCurrent(location, data);
@@ -72,7 +72,7 @@ export class OpenMeteoProvider implements IWeatherProvider {
     const url = this.buildUrl(lat, lon, {
       daily: DAILY_PARAMS,
       forecast_days: String(Math.min(days, 16)),
-      timezone: "UTC",
+      timezone: "auto",
     });
     const data = await this.fetchJson(url);
     return this.parseForecast(location, data, days);
@@ -178,7 +178,7 @@ export class OpenMeteoProvider implements IWeatherProvider {
       condition,
       condition_raw: `wmo:${wmoCode}`,
       provider_name: this.name,
-      observed_at: this.parseObservedAt(current.time),
+      observed_at: this.parseObservedAt(current.time, data.utc_offset_seconds),
       latitude: typeof data.latitude === "number" ? data.latitude : undefined,
       longitude:
         typeof data.longitude === "number" ? data.longitude : undefined,
@@ -253,11 +253,21 @@ export class OpenMeteoProvider implements IWeatherProvider {
     });
   }
 
-  private parseObservedAt(rawTime: unknown): Date {
+  private parseObservedAt(rawTime: unknown, utcOffsetSeconds: unknown): Date {
     if (typeof rawTime !== "string") return new Date();
-    const iso = HAS_TIMEZONE_SUFFIX.test(rawTime) ? rawTime : `${rawTime}Z`;
-    const parsed = new Date(iso);
-    return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+    // With `timezone=auto`, Open-Meteo returns `current.time` in the
+    // location's local time with no offset suffix. Use the response's
+    // `utc_offset_seconds` to recover the correct UTC instant. If the
+    // string already carries an explicit offset (e.g. Z), trust it.
+    if (HAS_TIMEZONE_SUFFIX.test(rawTime)) {
+      const parsed = new Date(rawTime);
+      return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+    }
+    const localAsUtc = new Date(`${rawTime}Z`);
+    if (Number.isNaN(localAsUtc.getTime())) return new Date();
+    const offsetMs =
+      typeof utcOffsetSeconds === "number" ? utcOffsetSeconds * 1000 : 0;
+    return new Date(localAsUtc.getTime() - offsetMs);
   }
 }
 
