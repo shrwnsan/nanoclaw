@@ -104,15 +104,27 @@ function buildApprovalOptions(agentGroups: AgentGroup[]): RawOption[] {
   return options;
 }
 
+/**
+ * Escape Telegram Markdown legacy special characters in user-provided text
+ * (sender names, channel names) so the registration card doesn't crash
+ * Telegram's entity parser.  Only the characters that have meaning in
+ * Telegram's Markdown parse_mode are escaped: `* _ [ ] `.
+ */
+function escapeTelegramMd(str: string): string {
+  return str.replace(/([*_\[\]`])/g, '\\$1');
+}
+
 function buildQuestionText(
   isGroup: boolean,
   senderName: string | undefined,
   channelName: string | null,
   channelType: string,
 ): string {
-  const who = senderName ?? 'Someone';
+  const who = escapeTelegramMd(senderName ?? 'Someone');
   if (isGroup) {
-    const where = channelName ? `${channelName} on ${channelType}` : `a ${channelType} channel`;
+    const where = channelName
+      ? `${escapeTelegramMd(channelName)} on ${channelType}`
+      : `a ${channelType} channel`;
     return `${who} mentioned your bot in ${where}. How would you like to handle this channel?`;
   }
   return `${who} sent your bot a DM on ${channelType}. How would you like to handle it?`;
