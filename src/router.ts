@@ -29,7 +29,8 @@ import {
 import { findSessionForAgent } from './db/sessions.js';
 import { startTypingRefresh, stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
-import { resolveSession, writeSessionMessage, writeOutboundDirect } from './session-manager.js';
+import { openInboundDb, resolveSession, writeSessionMessage, writeOutboundDirect } from './session-manager.js';
+import { upsertSessionRouting } from './db/session-db.js';
 import { wakeContainer } from './container-runner.js';
 import { getSession } from './db/sessions.js';
 import type { AgentGroup, MessagingGroup, MessagingGroupAgent } from './types.js';
@@ -160,10 +161,12 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   // (e.g. free-text replies during multi-step approval flows).
   if (messageInterceptor && (await messageInterceptor(event))) return;
 
-  // 0. Apply the adapter's thread policy. Non-threaded adapters (Telegram,
-  //    WhatsApp, iMessage, email) collapse threads to the channel.
+  // 0. Apply the adapter's thread policy. Non-threaded adapters (WhatsApp,
+  //    iMessage, email) collapse threads to the channel. Telegram preserves
+  //    thread_id for forum topic routing even though supportsThreads is false
+  //    (shared sessions, not per-topic isolation).
   const adapter = getChannelAdapter(event.channelType);
-  if (adapter && !adapter.supportsThreads) {
+  if (adapter && !adapter.supportsThreads && event.channelType !== 'telegram') {
     event = { ...event, threadId: null };
   }
 
@@ -413,6 +416,25 @@ async function deliverToAgent(
   }
 
   const { session, created } = resolveSession(agent.agent_group_id, mg.id, event.threadId, effectiveSessionMode);
+
+  // Update session routing so the agent's default reply target reflects the
+  // current message's topic. Shared sessions (supportsThreads=false) have
+  // session.thread_id=null, so without this the routing always points to the
+  // channel root (General topic) even when the message came from a specific
+  // topic. Only update when the event has a non-null threadId — preserves the
+  // existing routing for non-topic messages.
+  if (event.threadId !== null) {
+    const db = openInboundDb(session.agent_group_id, session.id);
+    try {
+      upsertSessionRouting(db, {
+        channel_type: event.channelType,
+        platform_id: event.platformId,
+        thread_id: event.threadId,
+      });
+    } finally {
+      db.close();
+    }
+  }
 
   // The inbound row's (channel_type, platform_id, thread_id) is the address
   // the agent's reply will be delivered to. Normally it mirrors the source
