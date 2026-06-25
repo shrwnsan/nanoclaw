@@ -164,17 +164,29 @@ export function writeSessionRouting(agentGroupId: string, sessionId: string): vo
     }
   }
 
+  // For shared sessions (session.thread_id is null), preserve an existing
+  // thread_id in the routing table rather than overwriting it. This allows
+  // the router's per-message upsertSessionRouting (e.g. Telegram forum topic
+  // routing) to survive container wakes. When session.thread_id is non-null
+  // (per-thread sessions, admin rewiring), always write it.
   const db = openInboundDb(agentGroupId, sessionId);
   try {
+    const effectiveThreadId =
+      session.thread_id !== null
+        ? session.thread_id
+        : (db.prepare('SELECT thread_id FROM session_routing WHERE id = 1').get() as
+            | { thread_id: string | null }
+            | undefined)?.thread_id ?? null;
+
     upsertSessionRouting(db, {
       channel_type: channelType,
       platform_id: platformId,
-      thread_id: session.thread_id,
+      thread_id: effectiveThreadId,
     });
   } finally {
     db.close();
   }
-  log.debug('Session routing written', { sessionId, channelType, platformId, threadId: session.thread_id });
+  log.debug('Session routing written', { sessionId, channelType, platformId });
 }
 
 /**
