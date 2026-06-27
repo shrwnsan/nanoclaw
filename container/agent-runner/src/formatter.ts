@@ -90,15 +90,16 @@ export interface RoutingContext {
 
 /**
  * Extract routing context from a batch of messages.
- * Uses the first message's routing fields.
+ * Uses the LAST message's routing fields so replies target the most recent
+ * conversation thread (e.g. the latest Telegram forum topic), not the oldest.
  */
 export function extractRouting(messages: MessageInRow[]): RoutingContext {
-  const first = messages[0];
+  const last = messages[messages.length - 1];
   return {
-    platformId: first?.platform_id ?? null,
-    channelType: first?.channel_type ?? null,
-    threadId: first?.thread_id ?? null,
-    inReplyTo: first?.id ?? null,
+    platformId: last?.platform_id ?? null,
+    channelType: last?.channel_type ?? null,
+    threadId: last?.thread_id ?? null,
+    inReplyTo: last?.id ?? null,
   };
 }
 
