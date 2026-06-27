@@ -1,7 +1,7 @@
 import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
 import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
 import { writeMessageOut } from './db/messages-out.js';
-import { touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
+import { openInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
 import {
   clearContinuation,
   migrateLegacyContinuation,
@@ -432,6 +432,31 @@ function sendToDestination(dest: DestinationEntry, body: string, routing: Routin
   });
 }
 
+/**
+ * Find the thread_id and message id from the most recent inbound message
+ * matching the given channel+platform. Returns null if no match found.
+ */
+function resolveDestinationThread(
+  channelType: string,
+  platformId: string,
+): { threadId: string | null; inReplyTo: string | null } | null {
+  const db = openInboundDb();
+  try {
+    const row = db
+      .prepare(
+        `SELECT thread_id, id FROM messages_in
+         WHERE channel_type = ? AND platform_id = ?
+         ORDER BY seq DESC LIMIT 1`,
+      )
+      .get(channelType, platformId) as { thread_id: string | null; id: string } | undefined;
+    if (row) return { threadId: row.thread_id, inReplyTo: row.id };
+  } catch (err) {
+    log(`resolveDestinationThread error: ${err instanceof Error ? err.message : String(err)}`);
+  } finally {
+    db.close();
+  }
+  return null;
+}
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
