@@ -180,9 +180,11 @@ export function writeSessionRouting(agentGroupId: string, sessionId: string): vo
     const effectiveThreadId =
       session.thread_id !== null
         ? session.thread_id
-        : (db.prepare('SELECT thread_id FROM session_routing WHERE id = 1').get() as
-            | { thread_id: string | null }
-            | undefined)?.thread_id ?? null;
+        : ((
+            db.prepare('SELECT thread_id FROM session_routing WHERE id = 1').get() as
+              | { thread_id: string | null }
+              | undefined
+          )?.thread_id ?? null);
 
     upsertSessionRouting(db, {
       channel_type: channelType,
