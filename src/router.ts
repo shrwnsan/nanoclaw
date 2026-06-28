@@ -29,8 +29,7 @@ import {
 import { findSessionForAgent } from './db/sessions.js';
 import { startTypingRefresh, stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
-import { openInboundDb, resolveSession, writeSessionMessage, writeOutboundDirect } from './session-manager.js';
-import { upsertSessionRouting } from './db/session-db.js';
+import { resolveSession, writeSessionMessage, writeOutboundDirect } from './session-manager.js';
 import { wakeContainer } from './container-runner.js';
 import { getSession } from './db/sessions.js';
 import type { AgentGroup, MessagingGroup, MessagingGroupAgent } from './types.js';
@@ -416,25 +415,6 @@ async function deliverToAgent(
   }
 
   const { session, created } = resolveSession(agent.agent_group_id, mg.id, event.threadId, effectiveSessionMode);
-
-  // Update session routing so the agent's default reply target reflects the
-  // current message's topic. Shared sessions (supportsThreads=false) have
-  // session.thread_id=null, so without this the routing always points to the
-  // channel root (General topic) even when the message came from a specific
-  // topic. Only update when the event has a non-null threadId — preserves the
-  // existing routing for non-topic messages.
-  if (event.threadId !== null) {
-    const db = openInboundDb(session.agent_group_id, session.id);
-    try {
-      upsertSessionRouting(db, {
-        channel_type: event.channelType,
-        platform_id: event.platformId,
-        thread_id: event.threadId,
-      });
-    } finally {
-      db.close();
-    }
-  }
 
   // The inbound row's (channel_type, platform_id, thread_id) is the address
   // the agent's reply will be delivered to. Normally it mirrors the source
