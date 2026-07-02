@@ -75,3 +75,49 @@ When rebasing `dev` onto a newer `upstream/main`, the feature commits (on `dev` 
 Resolution: merge both patterns — keep the interceptor loop + `event.instance` fallback, add the Telegram `&& event.channelType !== 'telegram'` exception.
 
 The convenience branch `feat/telegram-topics` holds a single squashed commit of all changes for easier cherry-pick if the individual commits prove painful during a rebase.
+
+## Upstream Landscape
+
+### Issue #1699 — "Telegram thread/topic replies lose thread context"
+
+Filed by `Davidsod` (2026-04-08) against the v1 codebase. Describes the same symptom (replies land in General instead of the originating topic) and proposes a straightforward plumbing fix: add `thread_id` to messages table, pass it through `sendMessage` call sites. The issue references v1 files (`src/db.ts`, `src/types.ts`) and doesn't address session model or routing architecture. Still open, no comments from upstream maintainer.
+
+### PR #1626 — "Telegram topic isolation with auto-registration"
+
+Filed by `rsdrahat` (open). Implements **per-topic isolation** — each forum topic gets its own virtual messaging group, separate session, separate container. Uses a custom JID scheme (`tg:…:t:42`) to multiplex topics within one supergroup. This is the full isolation approach — equivalent to setting `supportsThreads: true` on the Telegram adapter, but with additional per-topic folder/CLAUDE.md/parent-context seeding.
+
+### Premald's one-liner approach (PR #1626 comment, 2026-06-07)
+
+Community member `premald` demonstrated that the Chat SDK Telegram adapter on the upstream `channels` branch **already round-trips topics natively**:
+
+1. `parseMessage` encodes `thread.id = telegram:<chatId>:<topicId>` from `message_thread_id`
+2. `channelIdFromThreadId` strips the topic back to `telegram:<chatId>` for messaging-group lookup
+3. `postMessage` re-appends `message_thread_id` on send
+
+Combined with NanoClaw's existing per-thread session logic, flipping `supportsThreads: false → true` on the Telegram adapter gives per-topic isolation with **one line changed** — no custom JID scheme, no virtual groups.
+
+**Tradeoff vs our approach:** the one-liner gives per-topic *sessions* (isolated conversation history + correct routing) but **not** per-topic *folders / CLAUDE.md / separate containers* — which PR #1626 adds. Our shared-session approach gives the opposite: shared context across topics with correct reply routing, but no isolation.
+
+### Approach comparison
+
+| Aspect | Upstream (broken) | Premald one-liner | PR #1626 (rsdrahat) | Our implementation |
+|--------|------------------|-------------------|----------------------|-------------------|
+| Session model | One group, no topics | Per-topic isolation | Per-topic isolation | **Shared session** |
+| Conversation history | Lost (all in General) | Isolated per topic | Isolated per topic | **Shared across topics** |
+| Reply routing | Broken | Correct (native) | Correct (custom JID) | Correct (resolveDestinationThread) |
+| Custom code needed | — | ~1 line | ~500+ lines | ~200 lines |
+| Destination config | 1 per group | 1 per topic | Auto-created | 1 per group |
+| Scheduled task routing | Goes to General | Per-topic session | Per-topic session | Uses stable session_routing default |
+| MCP tools | — | — | — | create_topic + edit_topic |
+| Agent self-awareness | — | Per-topic context | Per-topic context | Knows its topic via session_routing |
+
+### Upstream PR viability
+
+Our implementation is tightly coupled to v2's two-DB session split, cross-mount SQLite semantics, and the shared-session model. A direct upstream PR would need significant reworking:
+
+- **Drop cross-mount `openInboundDb()` changes** — specific to Docker/virtiofs mounts, not relevant to most installs
+- **Adapt router change for `event.instance` pattern** — upstream refactored adapter lookup
+- **Decide on session model** — upstream may prefer per-topic isolation (aligns with existing architecture) over shared sessions
+- **Verify Chat SDK adapter topic support** — if the current `channels` branch adapter already round-trips `message_thread_id`, the router change could be simplified
+
+**Recommended path:** engage on issue #1699 with our findings before writing a PR. The shared-session vs per-topic isolation tradeoff is a design decision that needs upstream maintainer input. Our `resolveDestinationThread` approach (read latest `messages_in` for topic routing) is compatible with either session model and could be a useful building block regardless.
