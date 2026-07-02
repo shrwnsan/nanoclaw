@@ -47,6 +47,51 @@ Early versions updated `session_routing` on every inbound message. This was **re
 
 Per-topic entries in `agent_destinations` (e.g. separate entries for "alerts" and "log") cause the agent to fail silently. With multiple destinations, the agent must specify `to=` on every reply — and it often can't pick the right one, producing `<internal>` scratchpad instead of `<message>` blocks. One destination per messaging group is the correct configuration for shared sessions.
 
+## Known Gap: Scheduled Task Topic Routing
+
+### Problem
+
+Scheduled tasks (e.g., weather briefings) write to `messages_in` with `thread_id = null`. When the agent dispatches the response, `resolveDestinationThread` queries the latest `messages_in` for the platform — which returns whichever topic had the most recent **user message**, not the topic the task should target.
+
+The result is **non-deterministic routing**: the task output goes to whatever topic was last active, not a configured destination.
+
+### Evidence
+
+| Date | Task seq | Last `messages_in` topic | `thread_id` on output | Destination |
+|------|----------|--------------------------|----------------------|-------------|
+| July 1 (seq 167) | 116 | General (seq 118) | `null` | General (wrong) |
+| July 2 (seq 177) | 152 | Alerts (seq 158, from 15:13 HKT) | `:51` | Alerts (correct — by coincidence) |
+
+### Root cause
+
+`resolveDestinationThread` has no status filter, no time limit, and no awareness of task context:
+
+```sql
+SELECT thread_id, id FROM messages_in
+WHERE channel_type = ? AND platform_id = ?
+ORDER BY seq DESC LIMIT 1
+```
+
+It returns the **most recent message regardless of how old it is**. If no user message arrives between two daily weather tasks, the routing is whatever the last user touched — which could be any topic.
+
+### Why `session_routing` doesn't help
+
+We intentionally removed per-message `upsertSessionRouting` because it made `session_routing` "last writer wins" — scheduled tasks inherited the last active topic instead of their intended one. The `session_routing` table is written only on container wake and stays stable for user-initiated conversations. But it doesn't carry topic-level routing information for tasks.
+
+### Possible fixes
+
+| Option | Mechanism | Pros | Cons |
+|--------|-----------|------|------|
+| **1. Thread_id on task `messages_in`** | Scheduler writes `thread_id` to the task message | Clean — the task itself carries routing info | Requires scheduler to know which topic to target; needs a config field (`scheduled_thread_id` on messaging group or task) |
+| **2. `session_routing` fallback for tasks** | When `resolveDestinationThread` returns `null`, fall back to `session_routing.thread_id` | Uses existing infrastructure | Reintroduces the "last writer wins" problem for tasks specifically |
+| **3. `default_thread_id` on `agent_destinations`** | Each destination gets a thread_id hint; task dispatch uses it instead of resolving from `messages_in` | Separates config from runtime routing; destination-level granularity | Requires changes to destinations model and dispatch logic; needs `ncl destinations add --thread-id` support |
+
+Option 3 is the most architecturally clean — it separates "where should scheduled output go?" (a config concern) from "where was the last user message from?" (a routing concern). But it requires changes to the destinations model that touch both host and container code.
+
+### Related
+
+- See [guide-036](../../dotfiles-vps/docs/guides/guide-036-telegram-topic-routing-upstream-analysis.md) for the full Chat SDK adapter verification and session model analysis.
+
 ## Cross-Mount DB Visibility
 
 The container's `session_routing` table is written by the host (on the other side of a Docker volume mount). A long-lived `getInboundDb()` singleton connection freezes its view at the first read and never sees host-side updates. The fix is `openInboundDb()` — opens a fresh read-only connection per call with `mmap_size=0`, then closes it. This pattern applies to any table the host writes to after the container's initial connection was opened.
