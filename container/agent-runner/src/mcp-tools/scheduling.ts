@@ -52,6 +52,11 @@ export const scheduleTask: McpToolDefinition = {
             'Cron expression for recurring tasks (e.g., "0 9 * * 1-5" = weekdays at 9am user-local). Evaluated in the user\'s timezone.',
         },
         script: { type: 'string', description: 'Optional pre-agent script to run before processing' },
+        threadId: {
+          type: 'string',
+          description:
+            'Optional thread/topic ID for the task message (e.g. "telegram:<chatId>:<topicId>"). When set, the task\'s response routes to this specific topic instead of the session\'s current topic. Use for scheduled tasks that should always deliver to a fixed forum topic.',
+        },
       },
       required: ['prompt', 'processAfter'],
     },
@@ -74,6 +79,7 @@ export const scheduleTask: McpToolDefinition = {
     const r = routing();
     const recurrence = (args.recurrence as string) || null;
     const script = (args.script as string) || null;
+    const threadId = (args.threadId as string) || r.thread_id;
 
     // Write as a system action — host will insert into inbound.db
     writeMessageOut({
@@ -81,7 +87,7 @@ export const scheduleTask: McpToolDefinition = {
       kind: 'system',
       platform_id: r.platform_id,
       channel_type: r.channel_type,
-      thread_id: r.thread_id,
+      thread_id: threadId,
       content: JSON.stringify({
         action: 'schedule_task',
         taskId: id,
@@ -91,7 +97,7 @@ export const scheduleTask: McpToolDefinition = {
         recurrence,
         platformId: r.platform_id,
         channelType: r.channel_type,
-        threadId: r.thread_id,
+        threadId: threadId,
       }),
     });
 
@@ -263,6 +269,10 @@ export const updateTask: McpToolDefinition = {
           type: 'string',
           description: 'New pre-agent script (optional). Pass empty string to clear.',
         },
+        threadId: {
+          type: 'string',
+          description: 'New thread/topic ID for the task (optional). Pass empty string to clear and use the session\'s current topic.',
+        },
       },
       required: ['taskId'],
     },
@@ -282,9 +292,10 @@ export const updateTask: McpToolDefinition = {
         return err(`invalid processAfter: ${args.processAfter}`);
       }
     }
-    // Empty string clears recurrence/script; undefined leaves them as-is.
+    // Empty string clears recurrence/script/threadId; undefined leaves them as-is.
     if (typeof args.recurrence === 'string') update.recurrence = args.recurrence === '' ? null : args.recurrence;
     if (typeof args.script === 'string') update.script = args.script === '' ? null : args.script;
+    if (typeof args.threadId === 'string') update.threadId = args.threadId === '' ? null : args.threadId;
 
     if (Object.keys(update).length === 1) return err('at least one field to update is required');
 
