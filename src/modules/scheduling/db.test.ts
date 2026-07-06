@@ -252,6 +252,77 @@ describe('updateTask', () => {
     const touched = updateTask(db, 'task-1', { prompt: 'new' });
     expect(touched).toBe(0);
   });
+
+  it('updates thread_id when supplied', () => {
+    const db = freshDb();
+    insertTask(db, {
+      id: 'task-1',
+      processAfter: new Date().toISOString(),
+      recurrence: null,
+      platformId: null,
+      channelType: null,
+      threadId: null,
+      content: JSON.stringify({ prompt: 'p' }),
+    });
+
+    updateTask(db, 'task-1', { threadId: ':51' });
+
+    const row = db.prepare('SELECT thread_id FROM messages_in WHERE id = ?').get('task-1') as { thread_id: string | null };
+    expect(row.thread_id).toBe(':51');
+    db.close();
+  });
+
+  it('clears thread_id when null is passed', () => {
+    const db = freshDb();
+    insertTask(db, {
+      id: 'task-1',
+      processAfter: new Date().toISOString(),
+      recurrence: null,
+      platformId: null,
+      channelType: null,
+      threadId: ':99',
+      content: JSON.stringify({ prompt: 'p' }),
+    });
+
+    updateTask(db, 'task-1', { threadId: null });
+
+    const row = db.prepare('SELECT thread_id FROM messages_in WHERE id = ?').get('task-1') as { thread_id: string | null };
+    expect(row.thread_id).toBeNull();
+    db.close();
+  });
+
+  it('updates thread_id on live follow-up via series_id', () => {
+    const db = freshDb();
+    insertTask(db, {
+      id: 'task-orig',
+      processAfter: new Date().toISOString(),
+      recurrence: '0 9 * * *',
+      platformId: null,
+      channelType: null,
+      threadId: null,
+      content: JSON.stringify({ prompt: 'old' }),
+    });
+    db.prepare("UPDATE messages_in SET status = 'completed' WHERE id = 'task-orig'").run();
+
+    const msg: RecurringMessage = {
+      id: 'task-orig',
+      kind: 'task',
+      content: JSON.stringify({ prompt: 'old' }),
+      recurrence: '0 9 * * *',
+      process_after: null,
+      platform_id: null,
+      channel_type: null,
+      thread_id: null,
+      series_id: 'task-orig',
+    };
+    insertRecurrence(db, msg, 'task-next', new Date(Date.now() + 86400000).toISOString());
+
+    updateTask(db, 'task-orig', { threadId: ':42' });
+
+    const live = db.prepare("SELECT thread_id FROM messages_in WHERE id = 'task-next'").get() as { thread_id: string | null };
+    expect(live.thread_id).toBe(':42');
+    db.close();
+  });
 });
 
 describe('insertRecurrence', () => {
@@ -277,6 +348,39 @@ describe('insertRecurrence', () => {
       series_id: string;
     };
     expect(row.series_id).toBe('task-orig');
+    db.close();
+  });
+
+  it('copies thread_id forward', () => {
+    const db = freshDb();
+    insertTask(db, {
+      id: 'task-orig',
+      processAfter: new Date().toISOString(),
+      recurrence: '0 9 * * *',
+      platformId: null,
+      channelType: null,
+      threadId: ':51',
+      content: JSON.stringify({ prompt: 'weather' }),
+    });
+    db.prepare("UPDATE messages_in SET status = 'completed' WHERE id = 'task-orig'").run();
+
+    const msg: RecurringMessage = {
+      id: 'task-orig',
+      kind: 'task',
+      content: JSON.stringify({ prompt: 'weather' }),
+      recurrence: '0 9 * * *',
+      process_after: null,
+      platform_id: null,
+      channel_type: null,
+      thread_id: ':51',
+      series_id: 'task-orig',
+    };
+    insertRecurrence(db, msg, 'task-next', new Date().toISOString());
+
+    const row = db.prepare('SELECT thread_id FROM messages_in WHERE id = ?').get('task-next') as {
+      thread_id: string | null;
+    };
+    expect(row.thread_id).toBe(':51');
     db.close();
   });
 });

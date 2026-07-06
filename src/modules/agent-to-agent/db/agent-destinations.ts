@@ -44,8 +44,8 @@ import { getDb } from '../../../db/connection.js';
 export function createDestination(row: AgentDestination): void {
   getDb()
     .prepare(
-      `INSERT INTO agent_destinations (agent_group_id, local_name, target_type, target_id, created_at)
-       VALUES (@agent_group_id, @local_name, @target_type, @target_id, @created_at)`,
+      `INSERT INTO agent_destinations (agent_group_id, local_name, target_type, target_id, created_at, thread_id)
+       VALUES (@agent_group_id, @local_name, @target_type, @target_id, @created_at, @thread_id)`,
     )
     .run(row);
 }
@@ -79,6 +79,32 @@ export function hasDestination(agentGroupId: string, targetType: 'channel' | 'ag
     .prepare('SELECT 1 FROM agent_destinations WHERE agent_group_id = ? AND target_type = ? AND target_id = ? LIMIT 1')
     .get(agentGroupId, targetType, targetId);
   return !!row;
+}
+
+/**
+ * Update mutable fields on an existing destination row.
+ * Currently only `thread_id` is mutable; pass undefined to leave unchanged.
+ *
+ * ⚠️  Caller responsibility: after this returns, call
+ * `writeDestinations(agentGroupId, <sessionId>)` for each active session
+ * so the update propagates to the running container's inbound.db.
+ */
+export function updateDestination(
+  agentGroupId: string,
+  localName: string,
+  updates: { thread_id?: string | null },
+): void {
+  const sets: string[] = [];
+  const params: unknown[] = [];
+  if ('thread_id' in updates) {
+    sets.push('thread_id = ?');
+    params.push(updates.thread_id);
+  }
+  if (sets.length === 0) return;
+  params.push(agentGroupId, localName);
+  getDb()
+    .prepare(`UPDATE agent_destinations SET ${sets.join(', ')} WHERE agent_group_id = ? AND local_name = ?`)
+    .run(...params);
 }
 
 /**

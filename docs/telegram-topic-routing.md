@@ -47,7 +47,7 @@ Early versions updated `session_routing` on every inbound message. This was **re
 
 Per-topic entries in `agent_destinations` (e.g. separate entries for "alerts" and "log") cause the agent to fail silently. With multiple destinations, the agent must specify `to=` on every reply — and it often can't pick the right one, producing `<internal>` scratchpad instead of `<message>` blocks. One destination per messaging group is the correct configuration for shared sessions.
 
-## Known Gap: Scheduled Task Topic Routing
+## Scheduled Task Topic Routing
 
 ### Problem
 
@@ -55,38 +55,33 @@ Scheduled tasks (e.g., weather briefings) write to `messages_in` with `thread_id
 
 The result is **non-deterministic routing**: the task output goes to whatever topic was last active, not a configured destination.
 
-### Evidence
-
-| Date | Task seq | Last `messages_in` topic | `thread_id` on output | Destination |
-|------|----------|--------------------------|----------------------|-------------|
-| July 1 (seq 167) | 116 | General (seq 118) | `null` | General (wrong) |
-| July 2 (seq 177) | 152 | Alerts (seq 158, from 15:13 HKT) | `:51` | Alerts (correct — by coincidence) |
-
 ### Root cause
 
-`resolveDestinationThread` has no status filter, no time limit, and no awareness of task context:
+`resolveDestinationThread` queries `messages_in ORDER BY seq DESC LIMIT 1` — it returns the most recent message regardless of age or kind. If a user message arrives on topic 51 before the task fires, the agent's reply routes to topic 51 instead of the intended destination.
 
-```sql
-SELECT thread_id, id FROM messages_in
-WHERE channel_type = ? AND platform_id = ?
-ORDER BY seq DESC LIMIT 1
-```
+### Fix: `thread_id` on task `messages_in`
 
-It returns the **most recent message regardless of how old it is**. If no user message arrives between two daily weather tasks, the routing is whatever the last user touched — which could be any topic.
+The fix writes the correct `thread_id` onto the task message itself at schedule time. When `resolveDestinationThread` queries the latest `messages_in`, it finds the task message with the correct topic. No changes to `resolveDestinationThread` or `sendToDestination` — the routing info travels with the message.
 
-### Why `session_routing` doesn't help
+**Flow:**
+1. Agent calls `schedule_task` with optional `threadId` parameter (e.g. `"telegram:<chatId>:<topicId>"`)
+2. Container writes the `threadId` into the system action payload
+3. Host's `handleScheduleTask` writes `thread_id` onto the task's `messages_in` row
+4. Task wakes the container → agent processes → dispatches reply
+5. `resolveDestinationThread` finds the task message (latest in the batch) with correct `thread_id`
+6. Recurring tasks inherit `thread_id` via `insertRecurrence` — one fix propagates to all future occurrences
 
-We intentionally removed per-message `upsertSessionRouting` because it made `session_routing` "last writer wins" — scheduled tasks inherited the last active topic instead of their intended one. The `session_routing` table is written only on container wake and stays stable for user-initiated conversations. But it doesn't carry topic-level routing information for tasks.
+**Admin config:** `ncl destinations update --agent-group-id <id> --local-name <name> --thread-id "telegram:<chatId>:<topicId>"` sets the thread on a destination. The agent can then use this value when calling `schedule_task`.
 
-### Possible fixes
+**Backward compat:** The `threadId` parameter on `schedule_task` is optional. When omitted, the existing behavior applies (reads from `session_routing.thread_id`). Existing tasks keep working until explicitly updated via `update_task --thread-id "..."`.
 
-| Option | Mechanism | Pros | Cons |
-|--------|-----------|------|------|
-| **1. Thread_id on task `messages_in`** | Scheduler writes `thread_id` to the task message | Clean — the task itself carries routing info | Requires scheduler to know which topic to target; needs a config field (`scheduled_thread_id` on messaging group or task) |
-| **2. `session_routing` fallback for tasks** | When `resolveDestinationThread` returns `null`, fall back to `session_routing.thread_id` | Uses existing infrastructure | Reintroduces the "last writer wins" problem for tasks specifically |
-| **3. `default_thread_id` on `agent_destinations`** | Each destination gets a thread_id hint; task dispatch uses it instead of resolving from `messages_in` | Separates config from runtime routing; destination-level granularity | Requires changes to destinations model and dispatch logic; needs `ncl destinations add --thread-id` support |
+### Design decisions
 
-Option 3 is the most architecturally clean — it separates "where should scheduled output go?" (a config concern) from "where was the last user message from?" (a routing concern). But it requires changes to the destinations model that touch both host and container code.
+**Why not override `sendToDestination`?** If `dest.threadId` always wins in `sendToDestination`, reply routing breaks — user messages from topic 42 would get redirected to the configured default topic. If `dest.threadId` is a fallback (only when `resolveDestinationThread` returns null), it doesn't fix the problem because `resolveDestinationThread` almost always returns a non-null topic from the latest user message.
+
+**Why not `session_routing` fallback?** We intentionally removed per-message `upsertSessionRouting` to prevent "last writer wins" pollution. `session_routing` is stable for user conversations but doesn't carry per-topic routing for tasks.
+
+**`send_message` MCP tool (Path B) already respects `dest.threadId`** — it prefers the destination's thread over the session's thread. This is correct for explicit mid-response sends. The fix here covers the `<message>` tag path (Path A), where the agent's response is parsed after the provider returns.
 
 ### Related
 

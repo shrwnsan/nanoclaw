@@ -87,5 +87,28 @@ registerResource({
         return { removed: { agent_group_id: agentGroupId, local_name: localName } };
       },
     },
+    update: {
+      access: 'approval',
+      description: 'Update a destination. Use --agent-group-id, --local-name, and fields to update (--thread-id).',
+      handler: async (args) => {
+        const agentGroupId = args.agent_group_id as string;
+        const localName = args.local_name as string;
+        if (!agentGroupId) throw new Error('--agent-group-id is required');
+        if (!localName) throw new Error('--local-name is required');
+        const sets: string[] = [];
+        const params: unknown[] = [];
+        if ('thread_id' in args) {
+          sets.push('thread_id = ?');
+          params.push((args.thread_id as string) ?? null);
+        }
+        if (sets.length === 0) throw new Error('no fields to update — pass --thread-id');
+        params.push(agentGroupId, localName);
+        const result = getDb()
+          .prepare(`UPDATE agent_destinations SET ${sets.join(', ')} WHERE agent_group_id = ? AND local_name = ?`)
+          .run(...params);
+        if (result.changes === 0) throw new Error('destination not found');
+        return { updated: { agent_group_id: agentGroupId, local_name: localName, fields: Object.fromEntries(sets.map((s) => [s.split(' = ')[0], params[sets.indexOf(s)]])) } };
+      },
+    },
   },
 });

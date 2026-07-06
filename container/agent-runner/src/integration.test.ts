@@ -296,6 +296,64 @@ describe('poll loop integration', () => {
     await loopPromise.catch(() => {});
   });
 
+  it('task with thread_id routes outbound to that thread', async () => {
+    // Simulates a scheduled task that carries thread_id (e.g. a weather
+    // briefing targeting a specific Telegram forum topic).
+    // A stale user message from a different topic should NOT win — the
+    // task's thread_id is the latest message_in and resolveDestinationThread
+    // should return it.
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, kind, timestamp, status, platform_id, channel_type, thread_id, content)
+         VALUES ('t-weather', 'task', datetime('now'), 'pending', 'chan-1', 'discord', 'topic-51', ?)`,
+      )
+      .run(JSON.stringify({ prompt: 'weather briefing' }));
+
+    const provider = new MockProvider({}, () => '<message to="discord-test">Sunny, 25°C</message>');
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 2000);
+
+    await waitFor(() => getUndeliveredMessages().length > 0, 2000);
+    controller.abort();
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].thread_id).toBe('topic-51');
+    expect(out[0].in_reply_to).toBe('t-weather');
+
+    await loopPromise.catch(() => {});
+  });
+
+  it('task thread_id takes priority over stale user message thread', async () => {
+    // Stale user message on topic-A, then a task with thread_id targeting topic-B.
+    // resolveDestinationThread picks the latest (the task), so outbound should
+    // go to topic-B, not topic-A.
+    insertMessage('m-old', { sender: 'Alice', text: 'from topic A' }, { platformId: 'chan-1', channelType: 'discord', threadId: 'topic-A' });
+
+    // Insert task with a higher seq (it's inserted after, so SQLite gives it a higher rowid)
+    // We use the insert helper pattern but force kind='task'
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, kind, timestamp, status, platform_id, channel_type, thread_id, content)
+         VALUES ('t-target', 'task', datetime('now'), 'pending', 'chan-1', 'discord', 'topic-B', ?)`,
+      )
+      .run(JSON.stringify({ prompt: 'go to topic B' }));
+
+    const provider = new MockProvider({}, () => '<message to="discord-test">dispatched to B</message>');
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 2000);
+
+    await waitFor(() => getUndeliveredMessages().length > 0, 2000);
+    controller.abort();
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].thread_id).toBe('topic-B');
+    expect(out[0].in_reply_to).toBe('t-target');
+
+    await loopPromise.catch(() => {});
+  });
+
 });
 
 // Helper: run poll loop until aborted or timeout
