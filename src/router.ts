@@ -160,10 +160,12 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   // (e.g. free-text replies during multi-step approval flows).
   if (messageInterceptor && (await messageInterceptor(event))) return;
 
-  // 0. Apply the adapter's thread policy. Non-threaded adapters (Telegram,
-  //    WhatsApp, iMessage, email) collapse threads to the channel.
+  // 0. Apply the adapter's thread policy. Non-threaded adapters (WhatsApp,
+  //    iMessage, email) collapse threads to the channel. Telegram preserves
+  //    thread_id for forum topic routing even though supportsThreads is false
+  //    (shared sessions, not per-topic isolation).
   const adapter = getChannelAdapter(event.channelType);
-  if (adapter && !adapter.supportsThreads) {
+  if (adapter && !adapter.supportsThreads && event.channelType !== 'telegram') {
     event = { ...event, threadId: null };
   }
 
@@ -189,7 +191,7 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
       platform_id: event.platformId,
       name: null,
       is_group: event.message.isGroup ? 1 : 0,
-      unknown_sender_policy: 'request_approval',
+      unknown_sender_policy: 'strict',
       denied_at: null,
       created_at: new Date().toISOString(),
     };

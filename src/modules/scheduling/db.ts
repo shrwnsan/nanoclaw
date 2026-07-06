@@ -58,6 +58,7 @@ export interface TaskUpdate {
   script?: string | null;
   recurrence?: string | null;
   processAfter?: string;
+  threadId?: string | null;
 }
 
 // Merges content JSON in-place so callers can update prompt/script without
@@ -75,6 +76,7 @@ export function updateTask(db: Database.Database, taskId: string, update: TaskUp
 
   const setProcessAfter = update.processAfter !== undefined;
   const setRecurrence = update.recurrence !== undefined;
+  const setThreadId = update.threadId !== undefined;
   const mergeContent = update.prompt !== undefined || update.script !== undefined;
 
   const tx = db.transaction(() => {
@@ -97,6 +99,10 @@ export function updateTask(db: Database.Database, taskId: string, update: TaskUp
       if (setRecurrence) {
         sets.push('recurrence = ?');
         params.push(update.recurrence);
+      }
+      if (setThreadId) {
+        sets.push('thread_id = ?');
+        params.push(update.threadId);
       }
       params.push(row.id);
 

@@ -1,7 +1,7 @@
 import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
 import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
 import { writeMessageOut } from './db/messages-out.js';
-import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
+import { getInboundDb, openInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
 import { clearContinuation, migrateLegacyContinuation, setContinuation } from './db/session-state.js';
 import { clearCurrentInReplyTo, setCurrentInReplyTo } from './current-batch.js';
 import {
@@ -425,8 +425,10 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
  * and dispatch each one to its resolved destination. Text outside of blocks
  * (including <internal>...</internal>) is scratchpad — logged but not sent.
  *
- * The agent must always wrap output in <message to="name">...</message>
- * blocks, even with a single destination. Bare text is scratchpad only.
+ * The agent should wrap output in <message to="name">...</message> blocks.
+ * If no blocks are found and there's exactly one destination, the bare text
+ * is sent there as a fallback (handles models that don't produce the format).
+ * Otherwise bare text is scratchpad — logged but not sent.
  */
 function dispatchResultText(text: string, routing: RoutingContext): { sent: number; hasUnwrapped: boolean } {
   const MESSAGE_RE = /<message\s+to="([^"]+)"\s*>([\s\S]*?)<\/message>/g;
@@ -463,9 +465,18 @@ function dispatchResultText(text: string, routing: RoutingContext): { sent: numb
     log(`[scratchpad] ${scratchpad.slice(0, 500)}${scratchpad.length > 500 ? '…' : ''}`);
   }
 
-  const hasUnwrapped = sent === 0 && !!scratchpad;
+  const hasUnwrapped = sent === 0 && !!text.trim();
   if (hasUnwrapped) {
-    log(`WARNING: agent output had no <message to="..."> blocks — nothing was sent`);
+    // Bare-text fallback: if the model didn't produce <message> blocks but
+    // there's exactly one destination, send the scratchpad text there.
+    // This handles models that don't follow the XML message format.
+    const all = getAllDestinations();
+    if (all.length === 1) {
+      log(`No <message> blocks, single destination — sending bare text to "${all[0].name}"`);
+      sendToDestination(all[0], text.trim(), routing);
+      return { sent: 1, hasUnwrapped: false };
+    }
+    log(`WARNING: agent output had no <message to="..."> blocks — nothing was sent (${all.length} destinations)`);
   }
   return { sent, hasUnwrapped };
 }
@@ -497,8 +508,8 @@ function resolveDestinationThread(
   channelType: string,
   platformId: string,
 ): { threadId: string | null; inReplyTo: string | null } | null {
+  const db = openInboundDb();
   try {
-    const db = getInboundDb();
     const row = db
       .prepare(
         `SELECT thread_id, id FROM messages_in
@@ -509,6 +520,8 @@ function resolveDestinationThread(
     if (row) return { threadId: row.thread_id, inReplyTo: row.id };
   } catch (err) {
     log(`resolveDestinationThread error: ${err instanceof Error ? err.message : String(err)}`);
+  } finally {
+    db.close();
   }
   return null;
 }

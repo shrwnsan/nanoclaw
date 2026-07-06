@@ -84,6 +84,9 @@ export async function handleUpdateTask(
   if (content.script === null || typeof content.script === 'string') {
     update.script = content.script as string | null;
   }
+  if (content.threadId === null || typeof content.threadId === 'string') {
+    update.threadId = content.threadId as string | null;
+  }
   const touched = updateTask(inDb, taskId, update);
   log.info('Task updated', { taskId, touched, fields: Object.keys(update) });
   if (touched === 0) {

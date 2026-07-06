@@ -1,5 +1,23 @@
 import { getDb } from '../../db/connection.js';
+import { getSessionsByAgentGroup } from '../../db/sessions.js';
 import { registerResource } from '../crud.js';
+
+/**
+ * Propagate a destination mutation to all active sessions of the agent group.
+ * Without this, running containers keep serving the stale projection until
+ * their next wake. See agent-destinations.ts top-of-file invariant.
+ */
+async function projectToSessions(agentGroupId: string): Promise<void> {
+  try {
+    const { writeDestinations } = await import('../../modules/agent-to-agent/write-destinations.js');
+    const sessions = getSessionsByAgentGroup(agentGroupId);
+    for (const s of sessions) {
+      writeDestinations(agentGroupId, s.id);
+    }
+  } catch {
+    // agent-to-agent module not installed — no projection needed
+  }
+}
 
 registerResource({
   name: 'destination',
@@ -32,6 +50,12 @@ registerResource({
       type: 'string',
       description: "The target's ID — messaging_groups.id for channels, agent_groups.id for agents.",
     },
+    {
+      name: 'thread_id',
+      type: 'string',
+      description:
+        'Optional platform-specific thread/topic override (e.g. "telegram:<chatId>:<topicId>"). When set, messages sent to this destination route to the specified thread instead of the channel default.',
+    },
     { name: 'created_at', type: 'string', description: 'Auto-set.' },
   ],
   operations: { list: 'open' },
@@ -44,6 +68,7 @@ registerResource({
         const localName = args.local_name as string;
         const targetType = args.target_type as string;
         const targetId = args.target_id as string;
+        const threadId = args.thread_id as string | undefined;
         if (!agentGroupId) throw new Error('--agent-group-id is required');
         if (!localName) throw new Error('--local-name is required');
         if (!targetType || !['channel', 'agent'].includes(targetType)) {
@@ -52,11 +77,18 @@ registerResource({
         if (!targetId) throw new Error('--target-id is required');
         getDb()
           .prepare(
-            `INSERT INTO agent_destinations (agent_group_id, local_name, target_type, target_id, created_at)
-             VALUES (?, ?, ?, ?, datetime('now'))`,
+            `INSERT INTO agent_destinations (agent_group_id, local_name, target_type, target_id, thread_id, created_at)
+             VALUES (?, ?, ?, ?, ?, datetime('now'))`,
           )
-          .run(agentGroupId, localName, targetType, targetId);
-        return { agent_group_id: agentGroupId, local_name: localName, target_type: targetType, target_id: targetId };
+          .run(agentGroupId, localName, targetType, targetId, threadId ?? null);
+        await projectToSessions(agentGroupId);
+        return {
+          agent_group_id: agentGroupId,
+          local_name: localName,
+          target_type: targetType,
+          target_id: targetId,
+          thread_id: threadId ?? null,
+        };
       },
     },
     remove: {
@@ -71,7 +103,32 @@ registerResource({
           .prepare('DELETE FROM agent_destinations WHERE agent_group_id = ? AND local_name = ?')
           .run(agentGroupId, localName);
         if (result.changes === 0) throw new Error('destination not found');
+        await projectToSessions(agentGroupId);
         return { removed: { agent_group_id: agentGroupId, local_name: localName } };
+      },
+    },
+    update: {
+      access: 'approval',
+      description: 'Update a destination. Use --agent-group-id, --local-name, and fields to update (--thread-id).',
+      handler: async (args) => {
+        const agentGroupId = args.agent_group_id as string;
+        const localName = args.local_name as string;
+        if (!agentGroupId) throw new Error('--agent-group-id is required');
+        if (!localName) throw new Error('--local-name is required');
+        const sets: string[] = [];
+        const params: unknown[] = [];
+        if ('thread_id' in args) {
+          sets.push('thread_id = ?');
+          params.push((args.thread_id as string) ?? null);
+        }
+        if (sets.length === 0) throw new Error('no fields to update — pass --thread-id');
+        params.push(agentGroupId, localName);
+        const result = getDb()
+          .prepare(`UPDATE agent_destinations SET ${sets.join(', ')} WHERE agent_group_id = ? AND local_name = ?`)
+          .run(...params);
+        if (result.changes === 0) throw new Error('destination not found');
+        await projectToSessions(agentGroupId);
+        return { updated: { agent_group_id: agentGroupId, local_name: localName, fields: Object.fromEntries(sets.map((s) => [s.split(' = ')[0], params[sets.indexOf(s)]])) } };
       },
     },
   },
