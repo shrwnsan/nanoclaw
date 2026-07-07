@@ -1,5 +1,23 @@
 import { getDb } from '../../db/connection.js';
+import { getSessionsByAgentGroup } from '../../db/sessions.js';
 import { registerResource } from '../crud.js';
+
+/**
+ * Propagate a destination mutation to all active sessions of the agent group.
+ * Without this, running containers keep serving the stale projection until
+ * their next wake. See agent-destinations.ts top-of-file invariant.
+ */
+async function projectToSessions(agentGroupId: string): Promise<void> {
+  try {
+    const { writeDestinations } = await import('../../modules/agent-to-agent/write-destinations.js');
+    const sessions = getSessionsByAgentGroup(agentGroupId);
+    for (const s of sessions) {
+      writeDestinations(agentGroupId, s.id);
+    }
+  } catch {
+    // agent-to-agent module not installed — no projection needed
+  }
+}
 
 registerResource({
   name: 'destination',
@@ -63,6 +81,7 @@ registerResource({
              VALUES (?, ?, ?, ?, ?, datetime('now'))`,
           )
           .run(agentGroupId, localName, targetType, targetId, threadId ?? null);
+        await projectToSessions(agentGroupId);
         return {
           agent_group_id: agentGroupId,
           local_name: localName,
@@ -84,6 +103,7 @@ registerResource({
           .prepare('DELETE FROM agent_destinations WHERE agent_group_id = ? AND local_name = ?')
           .run(agentGroupId, localName);
         if (result.changes === 0) throw new Error('destination not found');
+        await projectToSessions(agentGroupId);
         return { removed: { agent_group_id: agentGroupId, local_name: localName } };
       },
     },
@@ -107,6 +127,7 @@ registerResource({
           .prepare(`UPDATE agent_destinations SET ${sets.join(', ')} WHERE agent_group_id = ? AND local_name = ?`)
           .run(...params);
         if (result.changes === 0) throw new Error('destination not found');
+        await projectToSessions(agentGroupId);
         return { updated: { agent_group_id: agentGroupId, local_name: localName, fields: Object.fromEntries(sets.map((s) => [s.split(' = ')[0], params[sets.indexOf(s)]])) } };
       },
     },
