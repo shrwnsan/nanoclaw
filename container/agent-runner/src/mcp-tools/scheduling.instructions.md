@@ -14,6 +14,14 @@ Frequent recurring scheduled tasks — more than a few times a day — consume A
 4. If `wakeAgent: false` — nothing happens, task waits for next run
 5. If `wakeAgent: true` — claude receives the script's data + prompt and handles
 
+### Long-running scripts
+
+Pre-task scripts are capped at **5 minutes** by default (well under the host's 30-min container kill ceiling). If a script legitimately needs longer — e.g. a scrape over many sources — set `scriptTimeoutMs` (milliseconds) alongside `script` and `prompt`. It's clamped to a max of 25 min; anything longer will be killed and the task skipped. Only use this for scripts you've timed and that touch heartbeat-safe work — a script blocks the poll loop for its whole runtime.
+
+```json
+{ "prompt": "...", "script": "...", "scriptTimeoutMs": 1200000 }
+```
+
 ### Always test your script first
 
 Before scheduling, run the script directly to verify it works:
