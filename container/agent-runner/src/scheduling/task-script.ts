@@ -4,7 +4,15 @@ import path from 'node:path';
 import type { MessageInRow } from '../db/messages-in.js';
 import { touchHeartbeat } from '../db/connection.js';
 
-const SCRIPT_TIMEOUT_MS = 30_000;
+// Default cap for a pre-task script. Was 30s, which silently killed legitimate
+// long-ish scripts on a slow run — e.g. JobWire's daily scrape budgets 30 min
+// internally and normally finishes in ~15-20s, but a slow day pushes it past
+// 30s → task skipped with no notification. 5 min covers slow runs with margin.
+const DEFAULT_SCRIPT_TIMEOUT_MS = 5 * 60 * 1000;
+// Hard ceiling for a per-script timeout override. Must stay under the host's
+// 30-min container kill ceiling (config.CONTAINER_TIMEOUT) so a long script
+// can't run so long the host reaps the container mid-script.
+const MAX_SCRIPT_TIMEOUT_MS = 25 * 60 * 1000;
 const SCRIPT_MAX_BUFFER = 1024 * 1024;
 const SCRIPT_RETRY_DELAY_MS = 3_000;
 
@@ -23,7 +31,11 @@ function log(msg: string): void {
   console.error(`[task-script] ${msg}`);
 }
 
-export async function runScript(script: string, taskId: string): Promise<ScriptResult | ScriptFailure> {
+export async function runScript(
+  script: string,
+  taskId: string,
+  timeoutMs: number = DEFAULT_SCRIPT_TIMEOUT_MS,
+): Promise<ScriptResult | ScriptFailure> {
   const scriptPath = path.join('/tmp', `task-script-${taskId}.sh`);
   fs.writeFileSync(scriptPath, script, { mode: 0o755 });
 
@@ -31,7 +43,7 @@ export async function runScript(script: string, taskId: string): Promise<ScriptR
     execFile(
       'bash',
       [scriptPath],
-      { timeout: SCRIPT_TIMEOUT_MS, maxBuffer: SCRIPT_MAX_BUFFER, env: process.env },
+      { timeout: timeoutMs, maxBuffer: SCRIPT_MAX_BUFFER, env: process.env },
       (error, stdout, stderr) => {
         try {
           fs.unlinkSync(scriptPath);
@@ -111,9 +123,20 @@ export async function applyPreTaskScripts(messages: MessageInRow[]): Promise<Tas
       continue;
     }
 
+    // Per-script timeout override (clamped under the ceiling). Lets genuinely
+    // long scripts (scrapes, builds) declare what they need instead of being
+    // capped at the default.
+    const declaredTimeout =
+      typeof content.scriptTimeoutMs === 'number' && Number.isFinite(content.scriptTimeoutMs)
+        ? content.scriptTimeoutMs
+        : null;
+    const timeoutMs = declaredTimeout
+      ? Math.min(Math.max(declaredTimeout, 1000), MAX_SCRIPT_TIMEOUT_MS)
+      : DEFAULT_SCRIPT_TIMEOUT_MS;
+
     log(`running script for task ${msg.id}`);
     touchHeartbeat();
-    let result = await runScript(script, msg.id);
+    let result = await runScript(script, msg.id, timeoutMs);
     touchHeartbeat();
 
     // Retry once on failure. We retry all failures (not just "transient")
@@ -124,7 +147,7 @@ export async function applyPreTaskScripts(messages: MessageInRow[]): Promise<Tas
       log(`task ${msg.id} script failed (${result.reason}), retrying in ${SCRIPT_RETRY_DELAY_MS / 1000}s`);
       touchHeartbeat();
       await new Promise((r) => setTimeout(r, SCRIPT_RETRY_DELAY_MS));
-      result = await runScript(script, msg.id);
+      result = await runScript(script, msg.id, timeoutMs);
       touchHeartbeat();
     }
 
