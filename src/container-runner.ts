@@ -53,45 +53,115 @@ const onecli = new OneCLI({ url: ONECLI_URL, apiKey: ONECLI_API_KEY });
 const activeContainers = new Map<string, { process: ChildProcess; containerName: string }>();
 
 /**
- * In-flight image rebuild promise. Deduplicates concurrent ensureImageExists
- * calls so two sessions waking simultaneously don't trigger parallel rebuilds.
+ * In-flight image rebuild promise. Single-flights concurrent ensureImageExists
+ * calls so N sessions waking at once share one rebuild instead of each kicking
+ * off a parallel `docker build`.
  */
 let rebuildPromise: Promise<void> | null = null;
 
+const IMAGE_REBUILD_MAX_ATTEMPTS = 3;
+const IMAGE_REBUILD_BACKOFF_MS = 15_000;
+const IMAGE_INSPECT_TIMEOUT_MS = 15_000;
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/** Cheap image-presence check. `docker image inspect` returns in milliseconds. */
+function imageExists(imageTag: string): boolean {
+  try {
+    execSync(`${CONTAINER_RUNTIME_BIN} image inspect ${imageTag}`, {
+      stdio: 'pipe',
+      timeout: IMAGE_INSPECT_TIMEOUT_MS,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Run container/build.sh asynchronously. A `docker build` can take minutes;
+ * the previous `execSync` form froze the whole host (router, delivery poll,
+ * host-sweep, OneCLI long-polls all stalled, then fired in a burst on unblock
+ * — the likely cause of the 3 concurrent rebuilds seen on 2026-07-27). Build
+ * output is kept in a rolling tail and logged on exit so a failed rebuild
+ * stays diagnosable. Resolves to the exit code; never rejects.
+ */
+function runBuildAsync(): Promise<number> {
+  return new Promise((resolve) => {
+    const child = spawn(`${process.cwd()}/container/build.sh`, [], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const tail: string[] = [];
+    const capture = (chunk: Buffer, stream: 'out' | 'err'): void => {
+      for (const line of chunk.toString().split('\n')) {
+        const trimmed = line.trim();
+        if (trimmed) tail.push(`[${stream}] ${trimmed}`);
+      }
+      if (tail.length > 15) tail.splice(0, tail.length - 15);
+    };
+    child.stdout?.on('data', (c: Buffer) => capture(c, 'out'));
+    child.stderr?.on('data', (c: Buffer) => capture(c, 'err'));
+    child.on('error', (err) => {
+      log.error('Container image rebuild: spawn failed', { err: err.message });
+      resolve(-1);
+    });
+    child.on('close', (code) => {
+      if (code !== 0) log.warn('Container image rebuild exited non-zero', { code, tail });
+      resolve(code ?? -1);
+    });
+  });
+}
+
 /**
  * Ensure the container image exists before spawn. The weekly docker-prune
- * timer removes images with no running container association; NanoClaw uses
- * --rm so all containers can be dead simultaneously, leaving the image
- * unprotected. Rebuilds from container/build.sh if missing.
+ * timer (`docker system prune -af --filter until=168h`) removes images with
+ * no running container association; NanoClaw uses --rm so all containers can
+ * be dead simultaneously, leaving the image unprotected.
+ *
+ * Hardened over the original: the build is async (no event-loop freeze),
+ * verifies the image actually exists afterward (build.sh exits 0 even on a
+ * cached failure or wrong tag), retries with backoff, and single-flights so
+ * concurrent wakes share one rebuild.
  */
-function ensureImageExists(imageTag: string): Promise<void> {
-  try {
-    execSync(`${CONTAINER_RUNTIME_BIN} image inspect ${imageTag}`, { stdio: 'pipe' });
-    return Promise.resolve();
-  } catch {}
+async function ensureImageExists(imageTag: string): Promise<void> {
+  if (imageExists(imageTag)) return;
 
   if (!rebuildPromise) {
-    rebuildPromise = new Promise<void>((resolve) => {
-      // Double-check after acquiring the lock — another caller may have rebuilt.
-      try {
-        execSync(`${CONTAINER_RUNTIME_BIN} image inspect ${imageTag}`, { stdio: 'pipe' });
-        resolve();
-        return;
-      } catch {}
-
-      log.warn('Container image missing (likely pruned), rebuilding...', { imageTag });
-      try {
-        execSync(`${process.cwd()}/container/build.sh`, { stdio: 'pipe' });
-        log.info('Container image rebuilt', { imageTag });
-      } catch (err) {
-        log.error('Container image rebuild failed', { imageTag, err });
-      } finally {
-        rebuildPromise = null;
-      }
-      resolve();
+    rebuildPromise = performImageRebuild(imageTag).finally(() => {
+      rebuildPromise = null;
     });
   }
-  return rebuildPromise;
+  await rebuildPromise;
+}
+
+async function performImageRebuild(imageTag: string): Promise<void> {
+  for (let attempt = 1; attempt <= IMAGE_REBUILD_MAX_ATTEMPTS; attempt++) {
+    log.warn('Container image missing (likely pruned), rebuilding...', {
+      imageTag,
+      attempt,
+      max: IMAGE_REBUILD_MAX_ATTEMPTS,
+    });
+    const exitCode = await runBuildAsync();
+    log.info('Container image build finished', { imageTag, attempt, exitCode });
+
+    // Verify — only the inspect is authoritative. build.sh builds the base
+    // image (CONTAINER_IMAGE); a 0 exit does not guarantee the requested tag.
+    if (imageExists(imageTag)) {
+      log.info('Container image ready', { imageTag });
+      return;
+    }
+    if (imageTag !== CONTAINER_IMAGE) {
+      log.error(
+        'Container image still missing: requested tag is not the base image build.sh produces',
+        { imageTag, baseImage: CONTAINER_IMAGE },
+      );
+      return;
+    }
+    if (attempt < IMAGE_REBUILD_MAX_ATTEMPTS) {
+      await sleep(IMAGE_REBUILD_BACKOFF_MS);
+    }
+  }
+  log.error('Container image missing and rebuild attempts exhausted', { imageTag });
 }
 
 /**
