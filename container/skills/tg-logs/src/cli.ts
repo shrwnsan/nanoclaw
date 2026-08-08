@@ -1,13 +1,16 @@
 #!/usr/bin/env bun
 /**
  * tg-logs skill — reads messages ingested by tg-topic-ingest from the mounted
- * logs.db for a given HKT day and prints them for summarization or lookup.
+ * logs.db for a given HKT day (or a rolling-hour window) and prints them for
+ * summarization, lookup, or quick counts.
  *
  * Usage:
- *   bun run /app/skills/tg-logs/src/cli.ts                    # yesterday, all sources, JSON
- *   bun run /app/skills/tg-logs/src/cli.ts --format text      # human-readable
- *   bun run /app/skills/tg-logs/src/cli.ts --days-ago 2       # 2 days ago
- *   bun run /app/skills/tg-logs/src/cli.ts --source <name>    # one source only
+ *   bun run /app/skills/tg-logs/src/cli.ts                        # yesterday, all sources, JSON
+ *   bun run /app/skills/tg-logs/src/cli.ts --format text          # human-readable
+ *   bun run /app/skills/tg-logs/src/cli.ts --days-ago 2           # 2 days ago
+ *   bun run /app/skills/tg-logs/src/cli.ts --source <name>        # one source only
+ *   bun run /app/skills/tg-logs/src/cli.ts --rolling-hours 24     # rolling 24h count
+ *   bun run /app/skills/tg-logs/src/cli.ts --rolling-hours 24 --format text
  *
  * Override the DB path for host-side testing: TG_LOGS_DB=./data/logs.db
  */
@@ -20,6 +23,7 @@ const DAY_MS = 86400000;
 
 interface Args {
   daysAgo: number;
+  rollingHours: number | null;
   format: "json" | "text";
   source: string | null;
 }
@@ -33,15 +37,16 @@ interface Row {
 }
 
 function parseArgs(argv: string[]): Args {
-  const a: Args = { daysAgo: 1, format: "json", source: null };
+  const a: Args = { daysAgo: 1, rollingHours: null, format: "json", source: null };
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
     const next = argv[i + 1];
     if (flag === "--days-ago") (a.daysAgo = Number(next ?? 1)), i++;
+    else if (flag === "--rolling-hours") (a.rollingHours = Number(next ?? 24)), i++;
     else if (flag === "--format") (a.format = next === "text" ? "text" : "json"), i++;
     else if (flag === "--source") (a.source = next ?? null), i++;
     else if (flag === "-h" || flag === "--help") {
-      console.log("usage: tg-logs [--days-ago N] [--format json|text] [--source NAME]");
+      console.log("usage: tg-logs [--days-ago N] [--rolling-hours N] [--format json|text] [--source NAME]");
       process.exit(0);
     }
   }
@@ -61,6 +66,18 @@ function windowFor(daysAgo: number): { start: string; end: string; label: string
   return { start: iso(startMs), end: iso(endMs), label: fmt.format(new Date(startMs)) };
 }
 
+/** Rolling N-hour window ending at now, as UTC ISO strings. */
+function rollingWindowFor(hours: number): { start: string; end: string; label: string } {
+  const now = new Date();
+  const start = new Date(now.getTime() - hours * 3600 * 1000);
+  const iso = (d: Date) => d.toISOString().replace(/\.\d{3}Z$/, "+00:00");
+  return {
+    start: iso(start),
+    end: iso(now),
+    label: `last ${hours}h`,
+  };
+}
+
 const args = parseArgs(process.argv.slice(2));
 
 let db: Database;
@@ -71,6 +88,47 @@ try {
   process.exit(1);
 }
 
+// --- Rolling-hours mode: per-source count over a sliding window ---
+if (args.rollingHours !== null) {
+  const { start, end, label } = rollingWindowFor(args.rollingHours);
+  const counts: Array<{ source: string; count: number }> = args.source
+    ? db
+        .prepare(
+          `SELECT source, COUNT(*) as count
+             FROM messages
+            WHERE date >= ? AND date < ? AND source = ?
+            GROUP BY source`,
+        )
+        .all(start, end, args.source) as Array<{ source: string; count: number }>
+    : db
+        .prepare(
+          `SELECT source, COUNT(*) as count
+             FROM messages
+            WHERE date >= ? AND date < ?
+            GROUP BY source`,
+        )
+        .all(start, end) as Array<{ source: string; count: number }>;
+
+  const total = counts.reduce((s, r) => s + r.count, 0);
+  db.close();
+
+  if (args.format === "json") {
+    console.log(
+      JSON.stringify(
+        { window: label, from: start, to: end, total, by_source: counts },
+        null,
+        2,
+      ),
+    );
+  } else {
+    const lines = counts.map((r) => `  ${r.source}: ${r.count}`);
+    console.log(`tg-logs — ${label} — ${total} messages (${start} → ${end})`);
+    if (lines.length) console.log(lines.join("\n"));
+  }
+  process.exit(0);
+}
+
+// --- Default day-window mode ---
 const { start, end, label } = windowFor(args.daysAgo);
 const rows: Row[] = args.source
   ? db
