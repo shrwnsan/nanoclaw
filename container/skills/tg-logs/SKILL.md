@@ -1,19 +1,39 @@
 ---
 name: tg-logs
-description: Reads Telegram topic messages ingested by tg-topic-ingest from the mounted logs.db. Use when asked for a daily digest or summary of a topic's messages, or to look up recent entries by day.
+description: Reads Telegram topic messages ingested by tg-topic-ingest from the mounted logs.db. Use for daily digests, recent message lookups, rolling counts ("how many in the last 24 hours"), or any question about message volume/timing.
 ---
 
 # tg-logs Skill
 
 Reads messages from the host-mounted `logs.db` (read-only, at
-`/workspace/extra/logs.db`) and prints them for summarization or lookup. The DB
-is populated by the `tg-topic-ingest` service (Telegram forum topic → SQLite),
-one row per message, with a `source` column identifying the originating topic /
-config source.
+`/workspace/extra/logs.db`) and prints them for summarization, lookup, or quick
+counts.  The DB is populated by the `tg-topic-ingest` service (Telegram forum
+topic → SQLite), one row per message, with a `source` column identifying the
+originating topic / config source.
+
+## When to Use
+
+- "How many messages in the last 24 hours?" or similar time-range count questions
+- "What happened yesterday?" — daily digest / summary
+- "Show me recent entries" — message lookup by day or source
+
+**Casual phrasing is fine** — map natural language to the right flags:
+| User says … | Run … |
+|---|---|
+| "how many / count / total" | `--rolling-hours N --format text` |
+| "what happened / show entries / digest" | `--days-ago 0 --format json` (then summarize) |
+| "yesterday / 2 days ago" | `--days-ago N` |
+| a specific source name | add `--source <name>` |
 
 ## Agent Execution
 
 ```bash
+# Rolling count — "how many in the last N hours?" (default 24)
+bun run /app/skills/tg-logs/src/cli.ts --rolling-hours 24 --format text
+
+# Different rolling window
+bun run /app/skills/tg-logs/src/cli.ts --rolling-hours 6 --format text
+
 # Yesterday's entries as JSON (default — summarize this)
 bun run /app/skills/tg-logs/src/cli.ts
 
@@ -28,6 +48,13 @@ bun run /app/skills/tg-logs/src/cli.ts --source <source-name>
 ```
 
 ## Output
+
+### Rolling-hours mode
+
+JSON: `{ window, from, to, total, by_source:[{source, count}] }`
+Text: `tg-logs — last 24h — 9 messages (… → …)` with per-source breakdown.
+
+### Day-window mode (default)
 
 JSON: `{ date, window:{start,end}, count, sources:[...], messages:[{msg_id, source, sender_name, date, text}] }`.
 
