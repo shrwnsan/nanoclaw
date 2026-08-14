@@ -24,6 +24,7 @@ originating topic / config source.
 | "what happened / show entries / digest" | `--days-ago 0 --format json` (then summarize) |
 | "yesterday / 2 days ago" | `--days-ago N` |
 | a specific source name | add `--source <name>` |
+| **daily digest / what really happened that day** | add `--use-content-time` |
 
 ## Agent Execution
 
@@ -45,6 +46,9 @@ bun run /app/skills/tg-logs/src/cli.ts --days-ago 2
 
 # Limit to one source (as named in the ingest config)
 bun run /app/skills/tg-logs/src/cli.ts --source <source-name>
+
+# Filter by content time instead of send time (digests — see Notes)
+bun run /app/skills/tg-logs/src/cli.ts --days-ago 1 --use-content-time
 ```
 
 ## Output
@@ -56,11 +60,12 @@ Text: `tg-logs — last 24h — 9 messages (… → …)` with per-source breakd
 
 ### Day-window mode (default)
 
-JSON: `{ date, window:{start,end}, count, sources:[...], messages:[{msg_id, source, sender_name, date, text}] }`.
+JSON: `{ date, window:{start,end}, time_basis, count, sources:[...], messages:[{msg_id, source, sender_name, date, content_time, text}] }`.
 
 - `date` / `window` are ISO-8601 UTC (`+00:00`), matching how `tg-topic-ingest` stores them.
 - `sender_name` is the Telegram display name.
 - The window is midnight-to-midnight **Asia/Hong_Kong**, converted to UTC.
+- **`--use-content-time`** filters/orders by `content_time` — the HKT clock the entry refers to (first line of the message, e.g. `20:20`), not when it was sent. Use this for daily digests: a backdated "20:20" entry posted the next morning correctly belongs to the prior evening. Rows with unparseable first lines (typos like `20:80`, notes) keep `content_time: null` and fall back to their send time, so they never disappear. Send-time `date` is always included for reference.
 
 ## Notes
 

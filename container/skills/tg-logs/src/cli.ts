@@ -11,6 +11,14 @@
  *   bun run /app/skills/tg-logs/src/cli.ts --source <name>        # one source only
  *   bun run /app/skills/tg-logs/src/cli.ts --rolling-hours 24     # rolling 24h count
  *   bun run /app/skills/tg-logs/src/cli.ts --rolling-hours 24 --format text
+ *   bun run /app/skills/tg-logs/src/cli.ts --use-content-time     # filter by content_time
+ *
+ * --use-content-time filters/oders by content_time (the HKT clock the entry
+ * refers to, parsed from the message's first line) instead of the Telegram
+ * send time. Rows without a parseable clock (typos, notes) fall back to their
+ * send time via COALESCE, so nothing silently disappears. Use this for daily
+ * digests: backdated entries ("20:20" posted next morning) land on the evening
+ * they belong to.
  *
  * Override the DB path for host-side testing: TG_LOGS_DB=./data/logs.db
  */
@@ -26,6 +34,7 @@ interface Args {
   rollingHours: number | null;
   format: "json" | "text";
   source: string | null;
+  useContentTime: boolean;
 }
 
 interface Row {
@@ -33,11 +42,12 @@ interface Row {
   source: string;
   sender_name: string | null;
   date: string;
+  content_time: string | null;
   text: string | null;
 }
 
 function parseArgs(argv: string[]): Args {
-  const a: Args = { daysAgo: 1, rollingHours: null, format: "json", source: null };
+  const a: Args = { daysAgo: 1, rollingHours: null, format: "json", source: null, useContentTime: false };
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
     const next = argv[i + 1];
@@ -45,8 +55,9 @@ function parseArgs(argv: string[]): Args {
     else if (flag === "--rolling-hours") (a.rollingHours = Number(next ?? 24)), i++;
     else if (flag === "--format") (a.format = next === "text" ? "text" : "json"), i++;
     else if (flag === "--source") (a.source = next ?? null), i++;
+    else if (flag === "--use-content-time") a.useContentTime = true;
     else if (flag === "-h" || flag === "--help") {
-      console.log("usage: tg-logs [--days-ago N] [--rolling-hours N] [--format json|text] [--source NAME]");
+      console.log("usage: tg-logs [--days-ago N] [--rolling-hours N] [--format json|text] [--source NAME] [--use-content-time]");
       process.exit(0);
     }
   }
@@ -88,15 +99,29 @@ try {
   process.exit(1);
 }
 
+// Time basis for WHERE/ORDER BY: content_time (FR-001) with send-time fallback,
+// or plain send time. Column may not exist on an older DB — detect once.
+const CONTENT_TIME_SQL = (() => {
+  if (!args.useContentTime) return { col: "date", selectCol: "NULL as content_time" };
+  try {
+    db.prepare("SELECT content_time FROM messages LIMIT 0").all();
+    return { col: "COALESCE(content_time, date)", selectCol: "content_time" };
+  } catch {
+    console.error("tg-logs: --use-content-time but messages.content_time column is missing (upgrade tg-topic-ingest); falling back to date");
+    return { col: "date", selectCol: "NULL as content_time" };
+  }
+})();
+
 // --- Rolling-hours mode: per-source count over a sliding window ---
 if (args.rollingHours !== null) {
   const { start, end, label } = rollingWindowFor(args.rollingHours);
+  const basis = CONTENT_TIME_SQL.col;
   const counts: Array<{ source: string; count: number }> = args.source
     ? db
         .prepare(
           `SELECT source, COUNT(*) as count
              FROM messages
-            WHERE date >= ? AND date < ? AND source = ?
+            WHERE ${basis} >= ? AND ${basis} < ? AND source = ?
             GROUP BY source`,
         )
         .all(start, end, args.source) as Array<{ source: string; count: number }>
@@ -104,7 +129,7 @@ if (args.rollingHours !== null) {
         .prepare(
           `SELECT source, COUNT(*) as count
              FROM messages
-            WHERE date >= ? AND date < ?
+            WHERE ${basis} >= ? AND ${basis} < ?
             GROUP BY source`,
         )
         .all(start, end) as Array<{ source: string; count: number }>;
@@ -130,21 +155,22 @@ if (args.rollingHours !== null) {
 
 // --- Default day-window mode ---
 const { start, end, label } = windowFor(args.daysAgo);
+const basis = CONTENT_TIME_SQL.col;
 const rows: Row[] = args.source
   ? db
       .prepare(
-        `SELECT msg_id, source, sender_name, date, text
+        `SELECT msg_id, source, sender_name, date, ${CONTENT_TIME_SQL.selectCol}, text
            FROM messages
-          WHERE date >= ? AND date < ? AND source = ?
-          ORDER BY date`,
+          WHERE ${basis} >= ? AND ${basis} < ? AND source = ?
+          ORDER BY ${basis}`,
       )
       .all(start, end, args.source)
   : db
       .prepare(
-        `SELECT msg_id, source, sender_name, date, text
+        `SELECT msg_id, source, sender_name, date, ${CONTENT_TIME_SQL.selectCol}, text
            FROM messages
-          WHERE date >= ? AND date < ?
-          ORDER BY date`,
+          WHERE ${basis} >= ? AND ${basis} < ?
+          ORDER BY ${basis}`,
       )
       .all(start, end);
 db.close();
@@ -154,16 +180,24 @@ const sources = [...new Set(rows.map((r) => r.source))].sort();
 if (args.format === "json") {
   console.log(
     JSON.stringify(
-      { date: label, window: { start, end }, count: rows.length, sources, messages: rows },
+      {
+        date: label,
+        window: { start, end },
+        time_basis: args.useContentTime ? "content_time" : "date",
+        count: rows.length,
+        sources,
+        messages: rows,
+      },
       null,
       2,
     ),
   );
 } else {
   const srcs = sources.length ? ` — sources: ${sources.join(", ")}` : "";
-  console.log(`tg-logs — ${label} — ${rows.length} messages (${start} → ${end})${srcs}`);
+  const basisTag = args.useContentTime ? " [content-time]" : "";
+  console.log(`tg-logs — ${label} — ${rows.length} messages (${start} → ${end})${srcs}${basisTag}`);
   for (const r of rows) {
-    const time = String(r.date).slice(11, 16);
+    const time = String(args.useContentTime ? (r.content_time ?? r.date) : r.date).slice(11, 16);
     const who = (r.sender_name ?? "?").padEnd(8);
     const text = (r.text ?? "").replace(/\n/g, " / ");
     console.log(`  ${time}  ${who}  ${text}`);
