@@ -47,7 +47,10 @@ export function createDestination(row: AgentDestination): void {
       `INSERT INTO agent_destinations (agent_group_id, local_name, target_type, target_id, created_at, thread_id)
        VALUES (@agent_group_id, @local_name, @target_type, @target_id, @created_at, @thread_id)`,
     )
-    .run(row);
+    // Default thread_id to NULL — callers without a per-topic thread
+    // (backfill, createMessagingGroupAgent) omit it, and better-sqlite3
+    // rejects a named parameter that's absent from the bound object.
+    .run({ thread_id: null, ...row });
 }
 
 export function getDestinations(agentGroupId: string): AgentDestination[] {
