@@ -4,6 +4,7 @@ import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from '
 import { getPendingMessages, markCompleted } from './db/messages-in.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { formatMessages, extractRouting } from './formatter.js';
+import { dispatchResultText } from './poll-loop.js';
 import { MockProvider } from './providers/mock.js';
 
 beforeEach(() => {
@@ -373,5 +374,187 @@ describe('end-to-end with mock provider', () => {
     expect(outMessages).toHaveLength(1);
     expect(JSON.parse(outMessages[0].content).text).toBe('The answer is 4');
     expect(outMessages[0].in_reply_to).toBe('m1');
+  });
+});
+
+describe('destination thread routing (scheduled tasks vs chat)', () => {
+  const PLATFORM = 'telegram:-100999000111';
+  const ALERTS_THREAD = `${PLATFORM}:51`;
+  const CHAT_THREAD = `${PLATFORM}:179`;
+
+  function seedAlertsDestination(): void {
+    getInboundDb()
+      .prepare(
+        `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id, thread_id)
+         VALUES ('alerts', 'alerts', 'channel', 'telegram', ?, NULL, ?)`,
+      )
+      .run(PLATFORM, ALERTS_THREAD);
+  }
+
+  function insertRoutedMessage(
+    id: string,
+    kind: string,
+    seq: number,
+    threadId: string | null,
+    status: 'pending' | 'completed',
+  ): void {
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, seq, kind, timestamp, status, platform_id, channel_type, thread_id, content)
+         VALUES (?, ?, ?, datetime('now'), ?, ?, 'telegram', ?, ?)`,
+      )
+      .run(id, seq, kind, status, PLATFORM, threadId, JSON.stringify({ text: 'x' }));
+  }
+
+  it('routes task output to the task row thread even when newer chat outranks it by seq', () => {
+    seedAlertsDestination();
+    // Task row: written a day earlier (lower seq), carries its target topic.
+    insertRoutedMessage('task-1', 'task', 10, ALERTS_THREAD, 'pending');
+    // Chat in another topic arrived after the task row was written.
+    insertRoutedMessage('chat-1', 'chat-sdk', 12, CHAT_THREAD, 'completed');
+
+    const routing = extractRouting(getPendingMessages());
+    dispatchResultText('<message to="alerts">Weather briefing</message>', routing);
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].thread_id).toBe(ALERTS_THREAD);
+    expect(out[0].in_reply_to).toBe('task-1');
+  });
+
+  it('task row wins routing when a newer chat message lands in the same pending batch', () => {
+    seedAlertsDestination();
+    // Wake collision: due task + fresh chat both pending, chat has higher seq.
+    insertRoutedMessage('task-1', 'task', 10, ALERTS_THREAD, 'pending');
+    insertRoutedMessage('chat-1', 'chat-sdk', 12, CHAT_THREAD, 'pending');
+
+    const routing = extractRouting(getPendingMessages());
+    expect(routing.kind).toBe('task');
+    expect(routing.threadId).toBe(ALERTS_THREAD);
+    dispatchResultText('<message to="alerts">Digest</message>', routing);
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].thread_id).toBe(ALERTS_THREAD);
+  });
+
+  it('routes interactive replies to the conversation topic, not the destination default', () => {
+    seedAlertsDestination();
+    insertRoutedMessage('chat-1', 'chat-sdk', 10, CHAT_THREAD, 'pending');
+
+    const routing = extractRouting(getPendingMessages());
+    dispatchResultText('<message to="alerts">Reply here</message>', routing);
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].thread_id).toBe(CHAT_THREAD);
+  });
+
+  it('keeps null thread (platform default topic) for replies from the default topic', () => {
+    seedAlertsDestination();
+    insertRoutedMessage('chat-1', 'chat-sdk', 10, null, 'pending');
+
+    const routing = extractRouting(getPendingMessages());
+    dispatchResultText('<message to="alerts">General reply</message>', routing);
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].thread_id).toBeNull();
+  });
+
+  it('falls back to the destination thread for legacy tasks scheduled without a thread', () => {
+    seedAlertsDestination();
+    insertRoutedMessage('task-1', 'task', 10, null, 'pending');
+
+    const routing = extractRouting(getPendingMessages());
+    dispatchResultText('<message to="alerts">Briefing</message>', routing);
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].thread_id).toBe(ALERTS_THREAD);
+  });
+
+  it('cross-destination send to a channel with no inbound history uses the destination thread', () => {
+    seedAlertsDestination();
+    getInboundDb()
+      .prepare(
+        `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id, thread_id)
+         VALUES ('squad', 'squad', 'channel', 'telegram', 'telegram:-100999', NULL, 'telegram:-100999:7')`,
+      )
+      .run();
+    // Batch comes from the alerts channel, not the squad channel.
+    insertRoutedMessage('task-1', 'task', 10, ALERTS_THREAD, 'pending');
+
+    const routing = extractRouting(getPendingMessages());
+    dispatchResultText('<message to="squad">Cross-post</message>', routing);
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].platform_id).toBe('telegram:-100999');
+    expect(out[0].thread_id).toBe('telegram:-100999:7');
+  });
+
+  it('cross-destination send to a channel with inbound history uses the latest inbound thread', () => {
+    seedAlertsDestination();
+    getInboundDb()
+      .prepare(
+        `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id, thread_id)
+         VALUES ('squad', 'squad', 'channel', 'telegram', 'telegram:-100999', NULL, 'telegram:-100999:7')`,
+      )
+      .run();
+    insertRoutedMessage('task-1', 'task', 10, ALERTS_THREAD, 'pending');
+    // The squad channel has its own recent inbound traffic in topic :9.
+    getInboundDb()
+      .prepare(
+        `INSERT INTO messages_in (id, seq, kind, timestamp, status, platform_id, channel_type, thread_id, content)
+         VALUES ('squad-chat', 14, 'chat-sdk', datetime('now'), 'completed', 'telegram:-100999', 'telegram', 'telegram:-100999:9', ?)`,
+      )
+      .run(JSON.stringify({ text: 'x' }));
+
+    const routing = extractRouting(getPendingMessages());
+    dispatchResultText('<message to="squad">Cross-post</message>', routing);
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].thread_id).toBe('telegram:-100999:9');
+  });
+
+  it('same-channel topic-bound destination is routed by the conversation, not its configured thread', () => {
+    // Documents the deliberate limitation: <message> blocks route by the
+    // conversation's topic (batch thread); a topic-bound destination on the
+    // same channel cannot be targeted via <message> — use send_message,
+    // which prefers dest.threadId.
+    seedAlertsDestination();
+    getInboundDb()
+      .prepare(
+        `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id, thread_id)
+         VALUES ('alerts-topic', 'alerts-topic', 'channel', 'telegram', ?, NULL, ?)`,
+      )
+      .run(PLATFORM, `${PLATFORM}:23`);
+    insertRoutedMessage('chat-1', 'chat-sdk', 10, CHAT_THREAD, 'pending');
+
+    const routing = extractRouting(getPendingMessages());
+    dispatchResultText(
+      `<message to="alerts">Reply</message><message to="alerts-topic">Cross-topic</message>`,
+      routing,
+    );
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(2);
+    expect(out[0].thread_id).toBe(CHAT_THREAD);
+    expect(out[1].thread_id).toBe(CHAT_THREAD);
+  });
+
+  it('bare-text fallback sends to the single destination with the batch thread', () => {
+    seedAlertsDestination();
+    insertRoutedMessage('chat-1', 'chat-sdk', 10, CHAT_THREAD, 'pending');
+
+    const routing = extractRouting(getPendingMessages());
+    dispatchResultText('No wrapping, just text', routing);
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].thread_id).toBe(CHAT_THREAD);
+    expect(JSON.parse(out[0].content).text).toBe('No wrapping, just text');
   });
 });
