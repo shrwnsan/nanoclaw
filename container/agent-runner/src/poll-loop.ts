@@ -266,6 +266,12 @@ async function processQuery(
   let queryContinuation: string | undefined;
   let done = false;
   let unwrappedNudged = false;
+  // Dispatch routing for this turn. Refreshed when a follow-up batch contains
+  // a task row: a task pushed into an active chat turn pins the turn's output
+  // to the task's target thread (extractRouting prefers task rows). Pure-chat
+  // follow-ups don't touch it — the reply belongs to the topic the turn
+  // started in, not to whatever arrived mid-turn.
+  let dispatchRouting = routing;
 
   // Concurrent polling: push follow-ups into the active query as they arrive.
   // We do NOT force-end the stream on silence — keeping the query open avoids
@@ -339,6 +345,9 @@ async function processQuery(
         const keptIds = keep.map((m) => m.id);
         const prompt = formatMessages(keep);
         log(`Pushing ${keep.length} follow-up message(s) into active query`);
+        if (keep.some((m) => m.kind === 'task')) {
+          dispatchRouting = extractRouting(keep);
+        }
         unwrappedNudged = false;
         query.push(prompt);
         markCompleted(keptIds);
@@ -378,7 +387,7 @@ async function processQuery(
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
         if (event.text) {
-          const { hasUnwrapped } = dispatchResultText(event.text, routing);
+          const { hasUnwrapped } = dispatchResultText(event.text, dispatchRouting);
           if (hasUnwrapped && !unwrappedNudged) {
             unwrappedNudged = true;
             const destinations = getAllDestinations();
@@ -430,7 +439,7 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
  * is sent there as a fallback (handles models that don't produce the format).
  * Otherwise bare text is scratchpad — logged but not sent.
  */
-function dispatchResultText(text: string, routing: RoutingContext): { sent: number; hasUnwrapped: boolean } {
+export function dispatchResultText(text: string, routing: RoutingContext): { sent: number; hasUnwrapped: boolean } {
   const MESSAGE_RE = /<message\s+to="([^"]+)"\s*>([\s\S]*?)<\/message>/g;
 
   let match: RegExpExecArray | null;
@@ -484,18 +493,39 @@ function dispatchResultText(text: string, routing: RoutingContext): { sent: numb
 function sendToDestination(dest: DestinationEntry, body: string, routing: RoutingContext): void {
   const platformId = dest.type === 'channel' ? dest.platformId! : dest.agentGroupId!;
   const channelType = dest.type === 'channel' ? dest.channelType! : 'agent';
-  // Resolve thread_id per-destination from the most recent inbound message
-  // that came from this same channel+platform. In agent-shared sessions,
-  // different destinations have different thread contexts — using a single
-  // routing.threadId would stamp one channel's thread onto another.
-  const destRouting = resolveDestinationThread(channelType, platformId);
+  // Thread resolution, in priority order:
+  //
+  // 1. When the destination is the channel the current batch came from, trust
+  //    the batch's own thread over "latest inbound row". A scheduled task row
+  //    carries its target topic in thread_id, but its seq is set when the
+  //    recurrence is inserted (~a day earlier) — any chat message since then
+  //    outranks it in resolveDestinationThread and steals the routing. The
+  //    batch thread is also correct for interactive replies (the topic the
+  //    message came from), including null = the platform's default topic.
+  // 2. Cross-destination sends fall back to the latest inbound row for that
+  //    channel, then the destination's configured thread_id.
+  const fromThisChannel = routing.channelType === channelType && routing.platformId === platformId;
+  let threadId: string | null;
+  let inReplyTo = routing.inReplyTo;
+  if (fromThisChannel) {
+    threadId = routing.threadId;
+    if (threadId === null && routing.kind === 'task') {
+      // Legacy task scheduled before per-task thread routing existed — the
+      // destination's configured thread is the intended target.
+      threadId = dest.threadId ?? null;
+    }
+  } else {
+    const destRouting = resolveDestinationThread(channelType, platformId);
+    threadId = destRouting?.threadId ?? dest.threadId ?? null;
+    inReplyTo = destRouting?.inReplyTo ?? routing.inReplyTo;
+  }
   writeMessageOut({
     id: generateId(),
-    in_reply_to: destRouting?.inReplyTo ?? routing.inReplyTo,
+    in_reply_to: inReplyTo,
     kind: 'chat',
     platform_id: platformId,
     channel_type: channelType,
-    thread_id: destRouting?.threadId ?? null,
+    thread_id: threadId,
     content: JSON.stringify({ text: body }),
   });
 }

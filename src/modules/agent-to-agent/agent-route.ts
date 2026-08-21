@@ -104,7 +104,8 @@ export interface RoutableAgentMessage {
   content: string;
   /**
    * For replies, the id of the inbound message being replied to. The
-   * container's formatter sets this from the first inbound in the batch
+   * container's formatter sets this from the batch's routing row — the last
+   * task row if the batch contains one, else the last message
    * (`container/agent-runner/src/formatter.ts`). Used here to route the
    * reply back to the originating session — see `resolveTargetSession`.
    */

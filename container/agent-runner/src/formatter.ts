@@ -98,20 +98,37 @@ export interface RoutingContext {
   channelType: string | null;
   threadId: string | null;
   inReplyTo: string | null;
+  /** Kind of the batch's last row ('task', 'chat', 'chat-sdk', …). */
+  kind: string | null;
 }
 
 /**
  * Extract routing context from a batch of messages.
- * Uses the LAST message's routing fields so replies target the most recent
- * conversation thread (e.g. the latest Telegram forum topic), not the oldest.
+ *
+ * Task rows win: when the batch contains any `kind='task'` row, the LAST task
+ * row provides the routing. Task rows carry their configured target thread
+ * (the `threadId` given to schedule_task), while chat rows only reflect where
+ * the conversation happened — so a due task that collides with newer chat in
+ * the same batch (wake collision) must not have its topic stolen by the chat.
+ *
+ * For pure-chat batches, the LAST message's routing fields are used so replies
+ * target the most recent conversation thread (e.g. the latest Telegram forum
+ * topic), not the oldest.
  */
 export function extractRouting(messages: MessageInRow[]): RoutingContext {
-  const last = messages[messages.length - 1];
+  let last = messages[messages.length - 1];
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].kind === 'task') {
+      last = messages[i];
+      break;
+    }
+  }
   return {
     platformId: last?.platform_id ?? null,
     channelType: last?.channel_type ?? null,
     threadId: last?.thread_id ?? null,
     inReplyTo: last?.id ?? null,
+    kind: last?.kind ?? null,
   };
 }
 
