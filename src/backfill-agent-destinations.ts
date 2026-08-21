@@ -26,10 +26,25 @@ export function backfillAgentDestinations(): void {
 
   // Clean up orphaned rows from v1 agent group IDs (underscore format)
   // that no longer exist in agent_groups.
-  const deleted = db
+  let deleted = db
     .prepare(
       `DELETE FROM agent_destinations
        WHERE agent_group_id NOT IN (SELECT id FROM agent_groups)`,
+    )
+    .run().changes;
+
+  // Clean up rows whose target no longer exists: channel destinations
+  // pointing at deleted messaging groups, agent destinations pointing at
+  // deleted agent groups. Neither delete path cascades to
+  // agent_destinations, and writeDestinations() silently drops dangling
+  // targets from the per-session projection — so these rows linger
+  // invisibly (visible only in `ncl destinations list`) and collide with
+  // the auto-namer's suffix loop on a future re-wire of the same channel.
+  deleted += db
+    .prepare(
+      `DELETE FROM agent_destinations
+       WHERE (target_type = 'channel' AND target_id NOT IN (SELECT id FROM messaging_groups))
+          OR (target_type = 'agent' AND target_id NOT IN (SELECT id FROM agent_groups))`,
     )
     .run().changes;
   if (deleted > 0) {
