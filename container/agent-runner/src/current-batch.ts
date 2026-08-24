@@ -2,28 +2,36 @@
  * Per-batch context the poll loop publishes for downstream consumers
  * (MCP tools, etc.) that don't sit on the poll-loop's call stack.
  *
- * Today the only field is `inReplyTo` — the id of the first inbound
- * message in the batch the agent is currently processing. MCP tools like
- * `send_message` and `send_file` read this and stamp it onto the outbound
- * row so the host's a2a return-path routing can correlate replies back to
- * the originating session.
+ * The poll loop calls `setCurrentBatchRouting` before invoking the
+ * provider and `clearCurrentBatchRouting` after the batch completes (or
+ * errors). MCP tools read it for:
+ *
+ * - `inReplyTo` — the id of the first inbound message in the batch,
+ *   stamped onto outbound rows (send_message, send_file) so the host's
+ *   a2a return-path routing can correlate replies back to the originating
+ *   session.
+ * - `threadId` / `kind` — `send_message`/`send_file` without an explicit
+ *   `to` reply in the thread the batch came from (the Telegram forum topic
+ *   of an interactive message, or a scheduled task's target topic),
+ *   mirroring how `sendToDestination` routes `<message>` dispatch. For
+ *   shared sessions `session_routing.thread_id` is null, so without this
+ *   those sends would land in the platform's default topic ("General").
  *
  * This is module-level state on purpose: the agent-runner is single-process
- * and processes one batch at a time. Poll-loop calls `setCurrentInReplyTo`
- * before invoking the provider and `clearCurrentInReplyTo` after the batch
- * completes (or errors out).
+ * and processes one batch at a time.
  */
-let currentInReplyTo: string | null = null;
+import type { RoutingContext } from './formatter.js';
 
-export function setCurrentInReplyTo(id: string | null): void {
-  currentInReplyTo = id;
+let currentRouting: RoutingContext | null = null;
+
+export function setCurrentBatchRouting(routing: RoutingContext): void {
+  currentRouting = routing;
 }
 
-export function clearCurrentInReplyTo(): void {
-  currentInReplyTo = null;
+export function clearCurrentBatchRouting(): void {
+  currentRouting = null;
 }
 
-export function getCurrentInReplyTo(): string | null {
-  return currentInReplyTo;
+export function getCurrentBatchRouting(): RoutingContext | null {
+  return currentRouting;
 }
-

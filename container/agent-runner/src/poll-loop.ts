@@ -3,7 +3,7 @@ import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } 
 import { writeMessageOut } from './db/messages-out.js';
 import { getInboundDb, openInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
 import { clearContinuation, migrateLegacyContinuation, setContinuation } from './db/session-state.js';
-import { clearCurrentInReplyTo, setCurrentInReplyTo } from './current-batch.js';
+import { clearCurrentBatchRouting, setCurrentBatchRouting } from './current-batch.js';
 import {
   formatMessages,
   extractRouting,
@@ -177,9 +177,10 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     // Process the query while concurrently polling for new messages
     const skippedSet = new Set(skipped);
     const processingIds = ids.filter((id) => !commandIds.includes(id) && !skippedSet.has(id));
-    // Publish the batch's in_reply_to so MCP tools (send_message, send_file)
-    // can stamp it on outbound rows — needed for a2a return-path routing.
-    setCurrentInReplyTo(routing.inReplyTo);
+    // Publish the batch's routing so MCP tools (send_message, send_file)
+    // can stamp in_reply_to on outbound rows (a2a return-path routing) and
+    // resolve no-`to` sends to the thread the batch came from.
+    setCurrentBatchRouting(routing);
     try {
       const result = await processQuery(query, routing, processingIds, config.providerName);
       if (result.continuation && result.continuation !== continuation) {
@@ -209,7 +210,7 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         content: JSON.stringify({ text: `Error: ${errMsg}` }),
       });
     } finally {
-      clearCurrentInReplyTo();
+      clearCurrentBatchRouting();
     }
 
     // Ensure completed even if processQuery ended without a result event
@@ -347,6 +348,9 @@ async function processQuery(
         log(`Pushing ${keep.length} follow-up message(s) into active query`);
         if (keep.some((m) => m.kind === 'task')) {
           dispatchRouting = extractRouting(keep);
+          // Keep MCP tools' no-`to` sends in sync with dispatch routing —
+          // a task becoming due mid-turn retargets both paths to its topic.
+          setCurrentBatchRouting(dispatchRouting);
         }
         unwrappedNudged = false;
         query.push(prompt);
