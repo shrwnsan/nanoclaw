@@ -17,7 +17,7 @@ Our approach preserves **shared sessions** (one container per group, shared cont
 
 1. **Router preserves `thread_id` for Telegram** — the thread-collapse check now skips Telegram (`event.channelType !== 'telegram'`)
 2. **Replies route via the batch thread** — `sendToDestination` uses the current batch's own `thread_id` when the destination matches the batch's channel+platform (see "Batch-thread priority" below). This means replies land in the topic the message came from; `resolveDestinationThread` (latest `messages_in` row for the channel) remains only as the cross-destination fallback
-3. **`session_routing` stays as a stable default** — only written on container wake (by `writeSessionRouting`), not updated per-message. It backs the `send_message` MCP tool's no-`to` reply path, not `<message>` dispatch
+3. **`session_routing` stays as a stable default** — only written on container wake (by `writeSessionRouting`), not updated per-message. It backs the `send_message` MCP tool's no-`to` reply path only when no batch context is available; mid-turn no-`to` sends use the batch's thread (see "Batch-thread priority"), as does `<message>` dispatch
 4. **`writeSessionRouting` preserves existing `thread_id`** — for shared sessions (`session.thread_id = null`), reads back and keeps whatever `thread_id` is already in the DB rather than overwriting with null on every container wake
 5. **Fresh DB connections for routing reads** — `session_routing` is written by the host after spawn. The container uses `openInboundDb()` (fresh read-only connection per call) instead of `getInboundDb()` (stale singleton) to see per-message updates
 
@@ -29,7 +29,9 @@ Our approach preserves **shared sessions** (one container per group, shared cont
 | `src/session-manager.ts` | Preserve `thread_id` on container wake for shared sessions |
 | `container/agent-runner/src/formatter.ts` | `extractRouting` uses last message, not first; task rows win over chat in mixed batches; `RoutingContext` carries `kind` |
 | `container/agent-runner/src/db/session-routing.ts` | Fresh `openInboundDb()` per call + proper `db.close()` |
-| `container/agent-runner/src/poll-loop.ts` | Fresh `openInboundDb()` in `resolveDestinationThread`; batch-thread priority in `sendToDestination` |
+| `container/agent-runner/src/poll-loop.ts` | Fresh `openInboundDb()` in `resolveDestinationThread`; batch-thread priority in `sendToDestination`; publishes the batch's `RoutingContext` via `setCurrentBatchRouting` |
+| `container/agent-runner/src/current-batch.ts` | Holds the full batch `RoutingContext` (was: `inReplyTo` only) so MCP tools can resolve threads |
+| `container/agent-runner/src/mcp-tools/core.ts` | `send_message`/`send_file` no-`to` and threadless-dest resolution mirrors dispatch's batch-thread priority (2026-08-24) |
 | `container/agent-runner/src/mcp-tools/telegram-topics.ts` | **New** — `create_topic` + `edit_topic` MCP tools |
 | `container/agent-runner/src/mcp-tools/index.ts` | Barrel registration |
 
@@ -96,7 +98,7 @@ This is why `RoutingContext` carries `kind` (`formatter.ts` → `extractRouting`
 
 - One `<message to=...>` name per channel cannot address topics individually: with per-topic destinations on one channel, every `<message>` block routes by the conversation's topic, overriding the dest's configured thread. Use `send_message` for topic-targeted sends.
 - Dispatch routing is frozen at batch start (refreshed only by task-carrying follow-ups). For a pure-chat turn, the reply goes to the topic of the message that started the turn even if other topics were active by dispatch time. This is deliberate — the old live-read could land a reply in a topic the sender never wrote in.
-- `send_message` without `to` replies to `session_routing.thread_id`, which is empty for shared sessions → platform default topic (General). Prompt flows that need a specific topic must always pass `to`.
+- ~~`send_message` without `to` replies to `session_routing.thread_id`, which is empty for shared sessions → platform default topic (General).~~ **Fixed (2026-08-24):** `send_message`/`send_file` without `to` now resolve the thread the same way dispatch does — the current batch's thread wins when it belongs to the session's channel (the topic an interactive message came from, or a task's target topic), with the same legacy threadless-task fallback to the sole same-channel destination's configured thread. An explicit `to` a *threadless* destination on the session's own channel also uses the batch thread instead of dropping to General; a per-topic destination's configured `thread_id` still wins for explicit targeting. Observed failure that prompted this: a shared-session agent's mid-turn digest re-sends omitted `to` and landed in General five times in a row (the tool's "you can omit `to` with one destination" contract only held when session routing was entirely absent). Prompt flows targeting a *different* topic than the current conversation must still pass `to` with a per-topic destination.
 
 **Admin config:** `ncl destinations update --agent-group-id <id> --local-name <name> --thread-id "telegram:<chatId>:<topicId>"` sets the thread on a destination. The agent can then use this value when calling `schedule_task`.
 

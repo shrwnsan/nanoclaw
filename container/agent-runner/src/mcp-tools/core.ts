@@ -9,7 +9,7 @@
 import fs from 'fs';
 import path from 'path';
 
-import { getCurrentInReplyTo } from '../current-batch.js';
+import { getCurrentBatchRouting } from '../current-batch.js';
 import { findByName, getAllDestinations } from '../destinations.js';
 import { getMessageIdBySeq, getRoutingBySeq, writeMessageOut } from '../db/messages-out.js';
 import { getSessionRouting } from '../db/session-routing.js';
@@ -56,10 +56,30 @@ function resolveRouting(
     // Default: reply to whatever thread/channel this session is bound to.
     const session = getSessionRouting();
     if (session.channel_type && session.platform_id) {
+      let thread_id = session.thread_id;
+      // Shared sessions pin no thread (session_routing.thread_id is null),
+      // and a null thread lands in the platform's default topic (Telegram
+      // "General"). Mirror sendToDestination's batch-thread priority
+      // (poll-loop.ts): when the current batch came from this channel, its
+      // thread — the topic an interactive message arrived in, or a
+      // scheduled task's target topic — is where "in place" actually is.
+      const batch = getCurrentBatchRouting();
+      if (batch && batch.channelType === session.channel_type && batch.platformId === session.platform_id) {
+        thread_id = batch.threadId;
+        if (thread_id === null && batch.kind === 'task') {
+          // Legacy task scheduled before per-task thread routing existed —
+          // the sole same-channel destination's configured thread is the
+          // intended target (same fallback as dispatch uses).
+          const sameChannel = getAllDestinations().filter(
+            (d) => d.type === 'channel' && d.channelType === session.channel_type && d.platformId === session.platform_id,
+          );
+          if (sameChannel.length === 1) thread_id = sameChannel[0].threadId ?? null;
+        }
+      }
       return {
         channel_type: session.channel_type,
         platform_id: session.platform_id,
-        thread_id: session.thread_id,
+        thread_id,
         resolvedName: '(current conversation)',
       };
     }
@@ -79,7 +99,17 @@ function resolveRouting(
   if (dest.type === 'channel') {
     const session = getSessionRouting();
     const isSameChannel = session.channel_type === dest.channelType && session.platform_id === dest.platformId;
-    const threadId = dest.threadId ?? (isSameChannel ? session.thread_id : null);
+    // A configured per-topic destination always wins. For a threadless
+    // destination on the session's own channel, fall back to the batch's
+    // thread (the conversation the agent is responding in) before the
+    // session default — shared sessions pin no thread, and a null thread
+    // lands in the platform's default topic ("General").
+    const batch = getCurrentBatchRouting();
+    const batchThread =
+      batch && batch.channelType === dest.channelType && batch.platformId === dest.platformId
+        ? batch.threadId
+        : null;
+    const threadId = dest.threadId ?? (isSameChannel ? (batchThread ?? session.thread_id) : null);
     return {
       channel_type: dest.channelType!,
       platform_id: dest.platformId!,
@@ -116,7 +146,7 @@ export const sendMessage: McpToolDefinition = {
     const id = generateId();
     const seq = writeMessageOut({
       id,
-      in_reply_to: getCurrentInReplyTo(),
+      in_reply_to: getCurrentBatchRouting()?.inReplyTo ?? null,
       kind: 'chat',
       platform_id: routing.platform_id,
       channel_type: routing.channel_type,
@@ -163,7 +193,7 @@ export const sendFile: McpToolDefinition = {
 
     writeMessageOut({
       id,
-      in_reply_to: getCurrentInReplyTo(),
+      in_reply_to: getCurrentBatchRouting()?.inReplyTo ?? null,
       kind: 'chat',
       platform_id: routing.platform_id,
       channel_type: routing.channel_type,
