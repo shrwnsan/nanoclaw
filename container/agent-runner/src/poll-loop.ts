@@ -481,13 +481,23 @@ export function dispatchResultText(text: string, routing: RoutingContext): { sen
   const hasUnwrapped = sent === 0 && !!text.trim();
   if (hasUnwrapped) {
     // Bare-text fallback: if the model didn't produce <message> blocks but
-    // there's exactly one destination, send the scratchpad text there.
+    // there's exactly one destination, send the text there.
     // This handles models that don't follow the XML message format.
     const all = getAllDestinations();
     if (all.length === 1) {
-      log(`No <message> blocks, single destination — sending bare text to "${all[0].name}"`);
-      sendToDestination(all[0], text.trim(), routing);
-      return { sent: 1, hasUnwrapped: false };
+      // Send the STRIPPED scratchpad, never the raw text: bare output can
+      // be entirely <internal> notes (observed: an agent's "send failed"
+      // note delivered to the chat topic verbatim, markup included). If
+      // nothing user-facing remains, send nothing and report unwrapped so
+      // the caller's nudge asks the model to re-send properly — the model
+      // likely believed a mid-turn MCP send was the delivery and gave up.
+      if (scratchpad) {
+        log(`No <message> blocks, single destination — sending bare text to "${all[0].name}"`);
+        sendToDestination(all[0], scratchpad, routing);
+        return { sent: 1, hasUnwrapped: false };
+      }
+      log('No <message> blocks and bare text is all <internal> — nothing sent, nudging');
+      return { sent: 0, hasUnwrapped: true };
     }
     log(`WARNING: agent output had no <message to="..."> blocks — nothing was sent (${all.length} destinations)`);
   }

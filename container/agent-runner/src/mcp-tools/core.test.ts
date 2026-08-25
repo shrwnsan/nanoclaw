@@ -11,10 +11,11 @@
  *   session's null default (Telegram "General").
  */
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
+import * as fs from 'node:fs';
 
 import { initTestSessionDb, closeSessionDb, getInboundDb } from '../db/connection.js';
 import { getUndeliveredMessages } from '../db/messages-out.js';
-import { setCurrentBatchRouting, clearCurrentBatchRouting } from '../current-batch.js';
+import { setCurrentBatchRouting, clearCurrentBatchRouting, CURRENT_BATCH_FILE } from '../current-batch.js';
 import type { RoutingContext } from '../formatter.js';
 import { sendMessage } from './core.js';
 
@@ -171,5 +172,54 @@ describe('send_message MCP tool — no-`to` thread resolution (shared sessions)'
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
     expect(out[0].thread_id).toBe('telegram:-100:179');
+  });
+});
+
+describe('send_message MCP tool — cross-process sidecar', () => {
+  // The nanoclaw MCP server runs as a stdio child process (index.ts) — its
+  // module state is always empty, so its lookups go through the sidecar
+  // file the poll loop mirrors batch routing into. Simulate the child by
+  // writing the file directly with no module state set.
+  it('routes no-`to` sends from the sidecar file when module state is empty', async () => {
+    seedSharedSessionWithAlertsDest();
+    fs.writeFileSync(
+      CURRENT_BATCH_FILE,
+      JSON.stringify(
+        batch({ channelType: 'telegram', platformId: 'telegram:-100', threadId: 'telegram:-100:51', kind: 'task' }),
+      ),
+    );
+    try {
+      await sendMessage.handler({ text: 'briefing progress' });
+    } finally {
+      fs.rmSync(CURRENT_BATCH_FILE, { force: true });
+    }
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].thread_id).toBe('telegram:-100:51');
+  });
+
+  it('stamps in_reply_to from the sidecar file (a2a return path)', async () => {
+    seedSharedSessionWithAlertsDest();
+    fs.writeFileSync(
+      CURRENT_BATCH_FILE,
+      JSON.stringify(batch({ channelType: 'telegram', platformId: 'telegram:-100', inReplyTo: 'inbound-msg-9' })),
+    );
+    try {
+      await sendMessage.handler({ text: 'hello' });
+    } finally {
+      fs.rmSync(CURRENT_BATCH_FILE, { force: true });
+    }
+
+    const out = getUndeliveredMessages();
+    expect(out).toHaveLength(1);
+    expect(out[0].in_reply_to).toBe('inbound-msg-9');
+  });
+
+  it('clearCurrentBatchRouting removes the sidecar so post-batch sends see no batch', () => {
+    setCurrentBatchRouting(batch({ channelType: 'telegram', platformId: 'telegram:-100', kind: 'task' }));
+    expect(fs.existsSync(CURRENT_BATCH_FILE)).toBe(true);
+    clearCurrentBatchRouting();
+    expect(fs.existsSync(CURRENT_BATCH_FILE)).toBe(false);
   });
 });
