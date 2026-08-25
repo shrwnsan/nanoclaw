@@ -557,4 +557,32 @@ describe('destination thread routing (scheduled tasks vs chat)', () => {
     expect(out[0].thread_id).toBe(CHAT_THREAD);
     expect(JSON.parse(out[0].content).text).toBe('No wrapping, just text');
   });
+
+  it('bare-text fallback strips <internal> notes before sending', () => {
+    seedAlertsDestination();
+    insertRoutedMessage('chat-1', 'chat-sdk', 10, CHAT_THREAD, 'pending');
+
+    const routing = extractRouting(getPendingMessages());
+    const result = dispatchResultText(
+      '<internal>scratch note about a failed send</internal>Here is the actual update',
+      routing,
+    );
+
+    const out = getUndeliveredMessages();
+    expect(result.hasUnwrapped).toBe(false);
+    expect(out).toHaveLength(1);
+    expect(JSON.parse(out[0].content).text).toBe('Here is the actual update');
+  });
+
+  it('bare-text fallback sends nothing when output is all <internal>, and reports unwrapped for the nudge', () => {
+    seedAlertsDestination();
+    insertRoutedMessage('chat-1', 'chat-sdk', 10, CHAT_THREAD, 'pending');
+
+    const routing = extractRouting(getPendingMessages());
+    const result = dispatchResultText('<internal>Failed again — to parameter not included</internal>', routing);
+
+    expect(result.sent).toBe(0);
+    expect(result.hasUnwrapped).toBe(true);
+    expect(getUndeliveredMessages()).toHaveLength(0);
+  });
 });
