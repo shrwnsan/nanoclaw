@@ -76,11 +76,23 @@ function resolveRouting(
           if (sameChannel.length === 1) thread_id = sameChannel[0].threadId ?? null;
         }
       }
+      // Report the destination whose configured thread we landed in, so
+      // the model can verify success — a bare "(current conversation)"
+      // reads as a misroute when the intended target was a named topic
+      // destination (observed: an agent sent a false "routed wrong"
+      // correction to the chat after a correctly-routed send).
+      let resolvedName = '(current conversation)';
+      if (thread_id) {
+        const match = getAllDestinations().find(
+          (d) => d.type === 'channel' && d.threadId === thread_id,
+        );
+        resolvedName = match ? match.name : `(current conversation, topic ${thread_id})`;
+      }
       return {
         channel_type: session.channel_type,
         platform_id: session.platform_id,
         thread_id,
-        resolvedName: '(current conversation)',
+        resolvedName,
       };
     }
     // No session routing (e.g., agent-shared or internal-only agent) —
