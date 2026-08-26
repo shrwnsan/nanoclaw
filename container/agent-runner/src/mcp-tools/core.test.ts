@@ -100,11 +100,22 @@ describe('send_message MCP tool — no-`to` thread resolution (shared sessions)'
       batch({ channelType: 'telegram', platformId: 'telegram:-100', threadId: 'telegram:-100:51', kind: 'task' }),
     );
 
-    await sendMessage.handler({ text: 'briefing progress' });
+    const result = (await sendMessage.handler({ text: 'briefing progress' })) as { content: { text: string }[] };
+    expect(result.content[0].text).toContain('sent to alerts');
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
     expect(out[0].thread_id).toBe('telegram:-100:51');
+  });
+
+  it("reports the topic for threads that match no destination's configured thread", async () => {
+    seedSharedSessionWithAlertsDest();
+    setCurrentBatchRouting(
+      batch({ channelType: 'telegram', platformId: 'telegram:-100', threadId: 'telegram:-100:179', kind: 'chat' }),
+    );
+
+    const result = (await sendMessage.handler({ text: 'mid-turn update' })) as { content: { text: string }[] };
+    expect(result.content[0].text).toContain('topic telegram:-100:179');
   });
 
   it('falls back to the sole same-channel destination thread for legacy threadless task batches', async () => {
