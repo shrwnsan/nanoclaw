@@ -4,6 +4,7 @@ Generated: 2026-09-15
 Base (merge-base): `61d7ca6bbafc0137f305cce364447f7603ab7549` (v2.0.58)
 HEAD at generation: `ded5eb95` (dev, 46 commits over base)
 Upstream: `a26c7ffb` (upstream/main, 1190 commits over base; v2.3.0 tagged at `dce271c6`)
+Landed: dev @ 269734c0 (upgrade/v2.3.0 replay + /add-telegram reinstall), 2026-09-15
 Source analysis: the operator's private upgrade recon guide (§2026-09-15 refresh; fate table + seam analysis).
 
 ## Decisions (binding for this replay)
