@@ -137,11 +137,13 @@ describe('fallbackChannelDefaults — behavior-faithful values', () => {
     vi.resetModules();
   });
 
-  it('reproduces trunk behavior for undeclared adapters', async () => {
+  it('applies the install policy for undeclared adapters (fork: strict)', async () => {
     const { fallbackChannelDefaults } = await import('./channel-registry.js');
+    // Fork hardening: unknown senders on undeclared adapters are dropped,
+    // not held for approval — trunk's 'request_approval' is overridden here.
     expect(fallbackChannelDefaults(true)).toEqual({
-      dm: { engageMode: 'pattern', engagePattern: '.', threads: true, unknownSenderPolicy: 'request_approval' },
-      group: { engageMode: 'mention-sticky', threads: true, unknownSenderPolicy: 'request_approval' },
+      dm: { engageMode: 'pattern', engagePattern: '.', threads: true, unknownSenderPolicy: 'strict' },
+      group: { engageMode: 'mention-sticky', threads: true, unknownSenderPolicy: 'strict' },
       mentions: 'platform',
     });
     // threads track the raw capability in BOTH contexts so NULL-inherit

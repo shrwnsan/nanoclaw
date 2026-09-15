@@ -1006,12 +1006,11 @@ describe('router — per-wiring thread policy', () => {
     await routeInbound(mention('tp-declared', 'tp:D1', false));
     expect((await getMessagingGroupByPlatform('tp-declared', 'tp:D1'))!.unknown_sender_policy).toBe('strict');
 
-    // Undeclared channel: the behavior-faithful fallback reproduces the
-    // historical hardcoded 'request_approval'.
+    // Undeclared channel: the fallback applies the install hardening policy —
+    // fork override of trunk's historical 'request_approval' (strict drops
+    // unknown senders instead of holding them for approval).
     await routeInbound(mention('tp-undeclared', 'tp:U1', true));
-    expect((await getMessagingGroupByPlatform('tp-undeclared', 'tp:U1'))!.unknown_sender_policy).toBe(
-      'request_approval',
-    );
+    expect((await getMessagingGroupByPlatform('tp-undeclared', 'tp:U1'))!.unknown_sender_policy).toBe('strict');
   });
 });
 

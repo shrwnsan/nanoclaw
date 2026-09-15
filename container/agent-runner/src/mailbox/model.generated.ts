@@ -482,7 +482,9 @@ export function parseDestinationRecord(value: unknown): DestinationRecord {
   const common = {
     name: text(record, 'name'),
     displayName: nullableText(record, 'displayName'),
-    threadId: nullableText(record, 'threadId'),
+    // Fork: tolerate ABSENT threadId (rows written before the pinned-thread
+    // field existed) — only a present-but-invalid value is rejected.
+    threadId: record.threadId === undefined ? null : nullableText(record, 'threadId'),
   };
   const type = oneOf(record, 'type', ['channel', 'agent'] as const);
   const channelType = nullableText(record, 'channelType');

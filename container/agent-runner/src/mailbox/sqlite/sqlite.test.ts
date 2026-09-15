@@ -82,6 +82,8 @@ describe('SQLite runner mailbox canonical serialization', () => {
       {
         name: 'test-room',
         displayName: null,
+        // Fork: pinned-thread field on destinations; null when unpinned.
+        threadId: null,
         type: 'channel',
         channelType: 'test',
         platformId: 'room',
