@@ -83,7 +83,7 @@ For ad-hoc central queries from skills or scripts, use the in-tree wrapper rathe
 | `src/channels/channel-defaults.ts` | Wiring-creation helpers over adapter-declared channel defaults (`resolveWiringDefaults`, `resolveThreadPolicy`, engage validation) |
 | `src/providers/` | Host-side provider container-config (`claude` baked in; `opencode` etc. installed from the `providers` branch) |
 | `container/agent-runner/src/` | Agent-runner: poll loop, formatter, provider abstraction, MCP tools, destinations |
-| `container/skills/` | Container skills mounted into every agent session (`agent-browser`, `frontend-engineer`, `onecli-gateway`, `self-customize`, `welcome`; opt-in skills like `vercel-cli`, `slack-formatting` and `whatsapp-formatting` install with the `/add-*` skill that adds their capability) |
+| `container/skills/` | Container skills mounted into every agent session (`agent-browser`, `frontend-engineer`, `onecli-gateway`, `self-customize`, `welcome`; opt-in skills like `vercel-cli`, `slack-formatting` and `whatsapp-formatting` install with the `/add-*` skill that adds their capability). This install also commits `weather`, `tg-logs`, `meta-search`, `remotion`, `systematic-debugging`, `tailnet-cdp`, `vercel-cli`, `slack-formatting` — kept across upgrades via `.nanoclaw-migrations/`. Never commit the untracked proprietary skills (`dataviz*`, `frontend-design`, `motion-craft`). |
 | `groups/<folder>/` | Per-agent-group filesystem (CLAUDE.md, skills) — agent-runner source is a shared read-only mount, not copied per group |
 | `scripts/init-first-agent.ts` | Bootstrap the first DM-wired agent (used by `/init-first-agent` skill) |
 | `scripts/skill-apply.ts` | Deterministic SKILL.md applier — executes `nc:` directive fences; declare/emit core, journaled + idempotent |
@@ -110,7 +110,7 @@ ncl help
 | users | list, get, create, update | Platform identities (`<channel>:<handle>`) |
 | roles | list, grant, revoke | Owner / admin privileges (global or scoped to an agent group) |
 | members | list, add, remove | Unprivileged access gate for an agent group |
-| destinations | list, add, remove | Where an agent group can send messages |
+| destinations | list, add, update, remove | Where an agent group can send messages (`update`/`--thread-id` are fork additions — pin a channel destination to a platform thread, e.g. a Telegram forum topic) |
 | sessions | list, get | Active sessions (read-only) |
 | tasks | list, get, create, update, cancel, pause, resume, delete, run, append-log | Scheduled tasks for an agent group |
 | user-dms | list | Cold-DM cache (read-only) |
@@ -303,6 +303,10 @@ This project uses pnpm with `minimumReleaseAge: 4320` (3 days) in `pnpm-workspac
 | [docs/skill-engine-seam.md](docs/skill-engine-seam.md) | Skill-engine consumer contract (wizard / pipeline / agent-relay) + boundary-rule rationale |
 | [docs/templates.md](docs/templates.md) | Agent templates: what they are, stamping via `ncl groups create --template` + the setup wizard, the OneCLI/MCP-credential model, supported providers, and how to contribute one |
 | [docs/hardened-image.md](docs/hardened-image.md) | Opt-in: pull the agent image from a registry instead of building it |
+| [docs/telegram-topic-routing.md](docs/telegram-topic-routing.md) | Fork: shared-session Telegram forum-topic routing on the v2.3 seams (two thread gates, pinned per-topic destinations, telegram-topics tool) |
+| [docs/skills-as-branches.md](docs/skills-as-branches.md) | Fork: how skills are vendored from branches and replayed on upgrade |
+| [docs/docker-sandboxes.md](docs/docker-sandboxes.md) | Fork: Docker sandboxing notes |
+| [docs/APPLE-CONTAINER-NETWORKING.md](docs/APPLE-CONTAINER-NETWORKING.md) | Fork: Apple Container networking (reference; this install runs Docker on Linux) |
 
 ## Container Build Cache
 
