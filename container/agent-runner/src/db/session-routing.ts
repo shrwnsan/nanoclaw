@@ -27,10 +27,12 @@ export function getSessionRouting(): SessionRouting {
  *
  * When the message being answered (`replyingTo`) came from that channel, its
  * thread is the answer — a reply lands where the request was made even if a
- * newer message from another thread arrived mid-turn. Otherwise fall back to
- * the latest inbound row from that channel (an agent-shared session sending to
- * a channel other than the one it is answering), and to no thread at all when
- * nothing has arrived from it.
+ * newer message from another thread arrived mid-turn. Otherwise a destination-
+ * pinned thread (`pinnedThreadId` — the fork's per-topic destinations) wins,
+ * which is what makes task-session output reach a fixed topic deterministically.
+ * Fall back to the latest inbound row from that channel (an agent-shared
+ * session sending to a channel other than the one it is answering), and to no
+ * thread at all when nothing has arrived from it.
  *
  * Never `session_routing.thread_id`: the bound thread is null for every session
  * that isn't per-thread (shared, agent-shared, DM sub-threads) even when the
@@ -42,9 +44,13 @@ export function resolveDestinationThread(
   channelType: string,
   platformId: string,
   replyingTo?: (Omit<ReplyRoute, 'inReplyTo'> & { inReplyTo: string | null }) | null,
+  pinnedThreadId?: string | null,
 ): { threadId: string | null; inReplyTo: string | null } | null {
   if (replyingTo && replyingTo.channelType === channelType && replyingTo.platformId === platformId) {
     return { threadId: replyingTo.threadId, inReplyTo: replyingTo.inReplyTo };
+  }
+  if (pinnedThreadId) {
+    return { threadId: pinnedThreadId, inReplyTo: null };
   }
   try {
     return getAgentMailbox().operations.getLatestInboundRoute(channelType, platformId);

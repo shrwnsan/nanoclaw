@@ -20,6 +20,8 @@ export interface DestinationEntry {
   channelType?: string;
   platformId?: string;
   agentGroupId?: string;
+  /** Pinned platform thread (e.g. a forum topic) for channel destinations. */
+  threadId?: string | null;
 }
 
 export type SessionMode = { kind: 'chat' } | { kind: 'task'; taskId: string };
@@ -32,6 +34,7 @@ function destinationEntry(destination: Destination): DestinationEntry {
     channelType: destination.channelType ?? undefined,
     platformId: destination.platformId ?? undefined,
     agentGroupId: destination.agentGroupId ?? undefined,
+    threadId: destination.threadId ?? null,
   };
 }
 

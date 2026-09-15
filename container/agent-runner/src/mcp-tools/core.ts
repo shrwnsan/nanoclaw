@@ -42,9 +42,12 @@ function destinationList(): string {
  * Resolve a destination name to routing fields.
  *
  * A channel destination is threaded like the poll loop's explicit deliveries:
- * the thread of the message being answered (the published reply stamp) when it
- * came from that channel, else that channel's latest inbound thread. An agent
- * destination never carries a thread.
+ * a destination-pinned thread (per-topic destinations) wins so explicit sends —
+ * including from isolated task sessions, which have no reply context — land in
+ * the pinned topic deterministically; else the thread of the message being
+ * answered (the published reply stamp) when it came from that channel, else
+ * that channel's latest inbound thread. An agent destination never carries a
+ * thread.
  */
 function resolveRouting(
   to: string,
@@ -56,7 +59,9 @@ function resolveRouting(
       channel_type: dest.channelType!,
       platform_id: dest.platformId!,
       thread_id:
-        resolveDestinationThread(dest.channelType!, dest.platformId!, getCurrentReplyRoute())?.threadId ?? null,
+        dest.threadId ??
+        resolveDestinationThread(dest.channelType!, dest.platformId!, getCurrentReplyRoute())?.threadId ??
+        null,
       resolvedName: to,
     };
   }

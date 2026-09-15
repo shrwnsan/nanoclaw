@@ -63,18 +63,34 @@ export interface DestinationRow {
   channel_type: string | null;
   platform_id: string | null;
   agent_group_id: string | null;
+  thread_id: string | null;
 }
 
 export function replaceDestinations(db: Database.Database, entries: DestinationRow[]): void {
   const tx = db.transaction((rows: DestinationRow[]) => {
     db.prepare('DELETE FROM destinations').run();
     const stmt = db.prepare(
-      `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
-       VALUES (@name, @display_name, @type, @channel_type, @platform_id, @agent_group_id)`,
+      `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id, thread_id)
+       VALUES (@name, @display_name, @type, @channel_type, @platform_id, @agent_group_id, @thread_id)`,
     );
     for (const row of rows) stmt.run(row);
   });
   tx(entries);
+}
+
+/**
+ * Lazy column-add for `destinations` on session DBs created before the pinned
+ * thread existed (there is no central migration for session DBs). No-op on
+ * fresh installs where the column is in the baseline schema.
+ */
+export function migrateDestinationsTable(db: Database.Database): void {
+  const cols = new Set(
+    (db.prepare("PRAGMA table_info('destinations')").all() as Array<{ name: string }>).map((c) => c.name),
+  );
+  if (cols.size === 0) return; // table absent — ensureSchema creates the current shape
+  if (!cols.has('thread_id')) {
+    db.prepare('ALTER TABLE destinations ADD COLUMN thread_id TEXT').run();
+  }
 }
 
 // ---------------------------------------------------------------------------

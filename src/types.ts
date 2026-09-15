@@ -262,6 +262,8 @@ export interface AgentDestination {
   local_name: string;
   target_type: 'channel' | 'agent';
   target_id: string;
+  /** Pin channel destinations to a platform thread (e.g. a forum topic). */
+  thread_id?: string | null;
   created_at: string;
 }
 

@@ -253,12 +253,14 @@ interface DestinationRow {
   channel_type: string | null;
   platform_id: string | null;
   agent_group_id: string | null;
+  thread_id: string | null;
 }
 
 function destination(row: DestinationRow): Destination {
   return parseDestinationRecord({
     name: row.name,
     displayName: row.display_name,
+    threadId: row.thread_id,
     type: row.type,
     channelType: row.channel_type,
     platformId: row.platform_id,

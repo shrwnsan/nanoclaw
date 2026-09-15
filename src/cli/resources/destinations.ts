@@ -60,6 +60,12 @@ registerResource({
       type: 'string',
       description: "The target's ID — messaging_groups.id for channels, agent_groups.id for agents.",
     },
+    {
+      name: 'thread_id',
+      type: 'string',
+      description:
+        'Optional pinned platform thread for channel destinations (e.g. a Telegram forum topic id). Pinned destinations deliver there deterministically; empty = dynamic reply/latest-inbound routing.',
+    },
     { name: 'channel_type', type: 'string', description: 'Resolved channel type for channel destinations.' },
     { name: 'display_name', type: 'string', description: 'Resolved chat title or agent name.' },
     { name: 'created_at', type: 'string', description: 'Auto-set.' },
@@ -82,6 +88,7 @@ registerResource({
                ad.target_id,
                CASE WHEN ad.target_type = 'channel' THEN mg.channel_type ELSE NULL END AS channel_type,
                CASE WHEN ad.target_type = 'channel' THEN mg.name ELSE ag.name END AS display_name,
+               ad.thread_id,
                ad.created_at
              FROM agent_destinations ad
              LEFT JOIN messaging_groups mg ON ad.target_type = 'channel' AND ad.target_id = mg.id
@@ -94,29 +101,70 @@ registerResource({
     },
     add: {
       access: 'approval',
-      description: 'Add a destination for an agent. Use --agent-group-id, --local-name, --target-type, --target-id.',
+      description:
+        'Add a destination for an agent. Use --agent-group-id, --local-name, --target-type, --target-id; optional --thread-id pins a channel destination to a platform thread (e.g. a forum topic).',
       handler: async (args) => {
         const agentGroupId = args.agent_group_id as string;
         const localName = args.local_name as string;
         const targetType = args.target_type as string;
         const targetId = args.target_id as string;
+        const threadId = (args.thread_id as string | undefined) ?? null;
         if (!agentGroupId) throw new Error('--agent-group-id is required');
         if (!localName) throw new Error('--local-name is required');
         if (!targetType || !['channel', 'agent'].includes(targetType)) {
           throw new Error('--target-type must be channel or agent');
         }
         if (!targetId) throw new Error('--target-id is required');
+        if (threadId && targetType !== 'channel') {
+          throw new Error('--thread-id applies to channel destinations only');
+        }
         await getDb().run(
-          `INSERT INTO agent_destinations (agent_group_id, local_name, target_type, target_id, created_at)
-           VALUES (?, ?, ?, ?, ?)`,
+          `INSERT INTO agent_destinations (agent_group_id, local_name, target_type, target_id, thread_id, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)`,
           agentGroupId,
           localName,
           targetType,
           targetId,
+          threadId,
           new Date().toISOString(),
         );
         await projectDestinationsToSessions(agentGroupId);
-        return { agent_group_id: agentGroupId, local_name: localName, target_type: targetType, target_id: targetId };
+        return {
+          agent_group_id: agentGroupId,
+          local_name: localName,
+          target_type: targetType,
+          target_id: targetId,
+          thread_id: threadId,
+        };
+      },
+    },
+    update: {
+      access: 'approval',
+      description:
+        "Update a channel destination's pinned thread. Use --agent-group-id, --local-name, --thread-id (empty string clears the pin).",
+      handler: async (args) => {
+        const agentGroupId = args.agent_group_id as string;
+        const localName = args.local_name as string;
+        const threadId = args.thread_id as string | undefined;
+        if (!agentGroupId) throw new Error('--agent-group-id is required');
+        if (!localName) throw new Error('--local-name is required');
+        if (threadId === undefined) throw new Error('--thread-id is required (empty string clears the pin)');
+        const row = await getDb().get<{ target_type: string }>(
+          'SELECT target_type FROM agent_destinations WHERE agent_group_id = ? AND local_name = ?',
+          agentGroupId,
+          localName,
+        );
+        if (!row) throw new Error('destination not found');
+        if (row.target_type !== 'channel') throw new Error('--thread-id applies to channel destinations only');
+        const pinned = threadId === '' ? null : threadId;
+        await getDb().run(
+          'UPDATE agent_destinations SET thread_id = ? WHERE agent_group_id = ? AND local_name = ?',
+          pinned,
+          agentGroupId,
+          localName,
+        );
+        await projectDestinationsToSessions(agentGroupId);
+        return { agent_group_id: agentGroupId, local_name: localName, thread_id: pinned };
       },
     },
     remove: {

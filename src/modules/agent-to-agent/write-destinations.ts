@@ -29,6 +29,7 @@ export async function writeDestinations(agentGroupId: string, sessionId: string)
         channelType: mg.channel_type,
         platformId: mg.platform_id,
         agentGroupId: null,
+        threadId: row.thread_id ?? null,
       });
     } else if (row.target_type === 'agent') {
       const ag = await getAgentGroup(row.target_id);
@@ -40,6 +41,7 @@ export async function writeDestinations(agentGroupId: string, sessionId: string)
         channelType: null,
         platformId: null,
         agentGroupId: ag.id,
+        threadId: null,
       });
     }
   }

@@ -122,6 +122,8 @@ export interface DeliveryRecord {
 interface DestinationRecordBase {
   name: string;
   displayName: string | null;
+  /** Pinned platform thread (e.g. a forum topic) for channel destinations. */
+  threadId: string | null;
 }
 
 export type DestinationRecord =
@@ -471,6 +473,7 @@ export function parseDestinationRecord(value: unknown): DestinationRecord {
   const record = strictRecord(value, 'DestinationRecord', [
     'name',
     'displayName',
+    'threadId',
     'type',
     'channelType',
     'platformId',
@@ -479,6 +482,7 @@ export function parseDestinationRecord(value: unknown): DestinationRecord {
   const common = {
     name: text(record, 'name'),
     displayName: nullableText(record, 'displayName'),
+    threadId: nullableText(record, 'threadId'),
   };
   const type = oneOf(record, 'type', ['channel', 'agent'] as const);
   const channelType = nullableText(record, 'channelType');

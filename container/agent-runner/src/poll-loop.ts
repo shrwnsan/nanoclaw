@@ -1205,11 +1205,11 @@ async function sendToDestination(dest: DestinationEntry, body: string, routing: 
   const platformId = dest.type === 'channel' ? dest.platformId! : dest.agentGroupId!;
   const channelType = dest.type === 'channel' ? dest.channelType! : 'agent';
   // Thread per destination: the batch's own thread when the destination is the
-  // channel being answered, else that channel's latest inbound thread. In
-  // agent-shared sessions different destinations have different thread
-  // contexts — stamping routing.threadId on every send would put one channel's
-  // thread onto another.
-  const destRouting = resolveDestinationThread(channelType, platformId, routing);
+  // channel being answered, else a destination-pinned thread (per-topic
+  // destinations), else that channel's latest inbound thread. In agent-shared
+  // sessions different destinations have different thread contexts — stamping
+  // routing.threadId on every send would put one channel's thread onto another.
+  const destRouting = resolveDestinationThread(channelType, platformId, routing, dest.threadId);
   await writeMessageOut({
     id: generateId(),
     in_reply_to: destRouting?.inReplyTo ?? routing.inReplyTo,
