@@ -169,7 +169,7 @@ function ensureServer(): void {
     log.error('Webhook server error', { port, err });
   });
 
-  candidate.listen(port, '0.0.0.0', () => {
+  candidate.listen(port, '127.0.0.1', () => {
     log.info('Webhook server started', { port, adapters: [...routes.keys()] });
   });
 }

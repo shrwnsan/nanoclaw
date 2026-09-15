@@ -83,7 +83,9 @@ WORKDIR /app
 COPY agent-runner/package.json agent-runner/bun.lock ./
 
 RUN --mount=type=cache,target=/root/.bun/install/cache \
-    bun install --frozen-lockfile
+    bun install --frozen-lockfile && \
+    rm -rf /app/node_modules/@anthropic-ai/claude-agent-sdk-linux-*musl* && \
+    test -x /app/node_modules/@anthropic-ai/claude-agent-sdk-linux-arm64/claude
 
 # ---- pnpm + global Node CLIs -------------------------------------------------
 # Most stable first, most frequently bumped last. Bumping claude-code
@@ -131,7 +133,7 @@ RUN chmod +x /app/entrypoint.sh
 # ---- Workspace + permissions -------------------------------------------------
 RUN mkdir -p /workspace/group /workspace/extra && \
     chown -R node:node /workspace && \
-    chmod 777 /home/node
+    chmod 1777 /home/node
 
 # Drop setuid-root from the binaries Debian ships (mount, su, passwd, ...). The
 # agent runs unprivileged and needs none of them.

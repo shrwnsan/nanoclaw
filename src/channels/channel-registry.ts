@@ -174,12 +174,14 @@ export function fallbackChannelDefaults(supportsThreads: boolean): ChannelDefaul
       engageMode: 'pattern',
       engagePattern: '.',
       threads: supportsThreads,
-      unknownSenderPolicy: 'request_approval',
+      // Install hardening (fork): unknown senders are dropped, not held for
+      // approval — unregistered senders never reach an approval prompt.
+      unknownSenderPolicy: 'strict',
     },
     group: {
       engageMode: 'mention-sticky',
       threads: supportsThreads,
-      unknownSenderPolicy: 'request_approval',
+      unknownSenderPolicy: 'strict',
     },
     mentions: 'platform',
   };

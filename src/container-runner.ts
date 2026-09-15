@@ -7,7 +7,7 @@
  * here is composition and lifecycle policy: which mounts, which env, restart
  * ordering, exit bookkeeping.
  */
-import { exec } from 'child_process';
+import { exec, execSync, spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -296,6 +296,17 @@ async function spawnContainer(session: Session): Promise<void> {
   if (!agentGroup) {
     log.error('Agent group not found', { agentGroupId: session.agent_group_id });
     return;
+  }
+
+  // Self-heal: ensure the resolved container image exists before any spawn
+  // work. The weekly docker-prune timer removes images with no running
+  // container association; NanoClaw containers are --rm, so all containers
+  // can be dead simultaneously and the image is unprotected (the 2026-07-27
+  // no-reply outage). Drivers that cannot build images deny here by design —
+  // the wake fails the way it always has for them.
+  if (getSessionDriver().capabilities().imageBuild) {
+    const configRow = await getContainerConfig(agentGroup.id);
+    await ensureImageExists(configRow?.image_tag || CONTAINER_IMAGE, agentGroup.id);
   }
 
   // Refresh the destination map and current-thread routing so any admin
@@ -1081,6 +1092,15 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
     ...(contribution.env ?? {}),
     ...(gateway.env ?? {}),
   };
+  // NO_PROXY — bypass the gateway for local services. The OneCLI gateway
+  // injects HTTPS_PROXY but NOT NO_PROXY, so all container HTTP routes
+  // through the proxy — including local MCP traffic to host.docker.internal,
+  // which hangs. Merge with any contributed NO_PROXY rather than clobbering
+  // provider-specific bypass entries.
+  const LOCAL_NO_PROXY = 'host.docker.internal,localhost,127.0.0.1,::1';
+  const existingNoProxy = contributedEnv.NO_PROXY ?? env.NO_PROXY;
+  env.NO_PROXY = existingNoProxy ? `${existingNoProxy},${LOCAL_NO_PROXY}` : LOCAL_NO_PROXY;
+  env.no_proxy = env.NO_PROXY;
 
   const hostUid = process.getuid?.();
   const hostGid = process.getgid?.();
@@ -1241,6 +1261,118 @@ function selectedSkillNames(containerConfig: import('./container-config.js').Con
 }
 
 const execAsync = promisify(exec);
+
+/**
+ * In-flight image rebuild promise. Single-flights concurrent
+ * ensureImageExists calls so N sessions waking at once share one rebuild
+ * instead of each kicking off a parallel `docker build`.
+ */
+let imageRebuildPromise: Promise<void> | null = null;
+
+const IMAGE_REBUILD_MAX_ATTEMPTS = 3;
+const IMAGE_REBUILD_BACKOFF_MS = 15_000;
+const IMAGE_INSPECT_TIMEOUT_MS = 15_000;
+
+/** Cheap image-presence check. `docker image inspect` returns in milliseconds. */
+function imageExists(imageTag: string): boolean {
+  try {
+    execSync(`${CONTAINER_RUNTIME_BIN} image inspect ${imageTag}`, {
+      stdio: 'pipe',
+      timeout: IMAGE_INSPECT_TIMEOUT_MS,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Rebuild the BASE image via container/build.sh, asynchronously. A `docker
+ * build` can take minutes; a sync form would freeze the whole host (router,
+ * delivery poll, sweep, OneCLI long-polls all stall, then fire in a burst on
+ * unblock — the 2026-07-27 outage mode). Output is kept as a rolling tail and
+ * logged on exit so a failed rebuild stays diagnosable. Resolves to the exit
+ * code; never rejects.
+ */
+function runBaseImageBuildAsync(): Promise<number> {
+  return new Promise((resolve) => {
+    const child = spawn(`${process.cwd()}/container/build.sh`, [], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const tail: string[] = [];
+    const capture = (chunk: Buffer, stream: 'out' | 'err'): void => {
+      for (const line of chunk.toString().split('\n')) {
+        const trimmed = line.trim();
+        if (trimmed) tail.push(`[${stream}] ${trimmed}`);
+      }
+      if (tail.length > 15) tail.splice(0, tail.length - 15);
+    };
+    child.stdout?.on('data', (c: Buffer) => capture(c, 'out'));
+    child.stderr?.on('data', (c: Buffer) => capture(c, 'err'));
+    child.on('error', (err) => {
+      log.error('Container image rebuild: spawn failed', { err: err.message });
+      resolve(-1);
+    });
+    child.on('close', (code) => {
+      if (code !== 0) log.warn('Container image rebuild exited non-zero', { code, tail });
+      resolve(code ?? -1);
+    });
+  });
+}
+
+/**
+ * Ensure the resolved container image exists before spawn, rebuilding the
+ * missing tag when the runtime driver can build. Verify after every build —
+ * only the inspect is authoritative (a build script can exit 0 without
+ * producing the requested tag). Retries with backoff; single-flights so
+ * concurrent wakes share one rebuild.
+ */
+async function ensureImageExists(imageTag: string, agentGroupId: string): Promise<void> {
+  if (imageExists(imageTag)) return;
+
+  if (!imageRebuildPromise) {
+    imageRebuildPromise = performImageRebuild(imageTag, agentGroupId).finally(() => {
+      imageRebuildPromise = null;
+    });
+  }
+  await imageRebuildPromise;
+  // The shared rebuild may have targeted a different tag — run our own,
+  // unshared, rather than returning for an image that still isn't there.
+  if (!imageExists(imageTag)) {
+    await performImageRebuild(imageTag, agentGroupId);
+  }
+}
+
+async function performImageRebuild(imageTag: string, agentGroupId: string): Promise<void> {
+  for (let attempt = 1; attempt <= IMAGE_REBUILD_MAX_ATTEMPTS; attempt++) {
+    log.warn('Container image missing (likely pruned), rebuilding...', {
+      imageTag,
+      attempt,
+      max: IMAGE_REBUILD_MAX_ATTEMPTS,
+    });
+    if (imageTag === CONTAINER_IMAGE) {
+      const exitCode = await runBaseImageBuildAsync();
+      log.info('Container image build finished', { imageTag, attempt, exitCode });
+    } else {
+      // Derived per-group image: rebuild through the in-process builder
+      // (it throws when the group has no custom packages — nothing to derive).
+      try {
+        await buildAgentGroupImage(agentGroupId);
+      } catch (err) {
+        log.error('Derived image rebuild failed', {
+          imageTag,
+          err: err instanceof Error ? err.message : err,
+        });
+      }
+    }
+    if (imageExists(imageTag)) {
+      log.info('Container image ready', { imageTag });
+      return;
+    }
+    if (attempt < IMAGE_REBUILD_MAX_ATTEMPTS) await sleep(IMAGE_REBUILD_BACKOFF_MS);
+  }
+  log.error('Container image missing and rebuild attempts exhausted', { imageTag });
+}
 
 /** Build a per-agent-group Docker image with custom packages. */
 export async function buildAgentGroupImage(agentGroupId: string): Promise<void> {
