@@ -1,0 +1,10 @@
+# Bun configuration for weather-skill.
+#
+# test/setup.ts (added in PRD-002 Phase 7.3) installs the
+# fixture-backed `fetch` mock via global `beforeAll`/`afterAll` hooks
+# so every test file replays canned API responses from
+# `fixtures/api-responses/` by default. Tests that need real network
+# can call `restoreFetch()` from the same module.
+
+[test]
+preload = ["./test/setup.ts"]
