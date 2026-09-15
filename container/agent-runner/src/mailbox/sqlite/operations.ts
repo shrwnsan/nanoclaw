@@ -214,17 +214,25 @@ export function sqliteGetUndeliveredMessages(): MessageOutRow[] {
 }
 
 export function sqliteGetSessionRouting(): SessionRouting {
-  const db = getInboundDb();
-  const exists = db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'session_routing'").get();
-  if (!exists) return { channelType: null, platformId: null, threadId: null };
-  const row = db.prepare('SELECT channel_type, platform_id, thread_id FROM session_routing WHERE id = 1').get() as
-    | { channel_type: string | null; platform_id: string | null; thread_id: string | null }
-    | undefined;
-  return parseSessionRoutingRecord({
-    channelType: row?.channel_type ?? null,
-    platformId: row?.platform_id ?? null,
-    threadId: row?.thread_id ?? null,
-  });
+  // Fresh readonly connection per read (fork): the host rewrites routing on
+  // every wake, and the long-lived singleton can hold a stale mmap of the
+  // cross-mounted file (journal_mode=DELETE relies on reopen for visibility).
+  // Open + close in try/finally, same pattern as sqliteGetPendingMessages.
+  const inbound = openInboundDb();
+  try {
+    const exists = inbound.prepare("SELECT 1 FROM sqlite_master WHERE name = 'session_routing'").get();
+    if (!exists) return { channelType: null, platformId: null, threadId: null };
+    const row = inbound
+      .prepare('SELECT channel_type, platform_id, thread_id FROM session_routing WHERE id = 1')
+      .get() as { channel_type: string | null; platform_id: string | null; thread_id: string | null } | undefined;
+    return parseSessionRoutingRecord({
+      channelType: row?.channel_type ?? null,
+      platformId: row?.platform_id ?? null,
+      threadId: row?.thread_id ?? null,
+    });
+  } finally {
+    inbound.close();
+  }
 }
 
 export function sqliteGetState(key: string): StateValue | undefined {

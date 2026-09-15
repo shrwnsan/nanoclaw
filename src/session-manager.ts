@@ -239,14 +239,23 @@ export async function writeSessionRouting(agentGroupId: string, sessionId: strin
     }
   }
 
+  let boundThreadId: string | null = null;
   await withMailboxSession(agentGroupId, sessionId, (mailbox) => {
+    // Fork (shared-session topic routing): shared sessions key on the group,
+    // not the thread (resolveSession ignores threadId in shared mode), so the
+    // session row has thread_id=null while chat happens in whichever forum
+    // topic is live. Preserve the previously bound thread as the routing
+    // fallback (ask_user_question/send_card last resort, agent self-knowledge)
+    // instead of nulling it on every wake. Read through the SAME mailbox —
+    // nesting a same-key session would deadlock.
+    boundThreadId = session.thread_id ?? mailbox.getRouting()?.threadId ?? null;
     mailbox.setRouting({
       channelType,
       platformId,
-      threadId: session.thread_id,
+      threadId: boundThreadId,
     });
   });
-  log.debug('Session routing written', { sessionId, channelType, platformId, threadId: session.thread_id });
+  log.debug('Session routing written', { sessionId, channelType, platformId, threadId: boundThreadId });
 }
 
 /**

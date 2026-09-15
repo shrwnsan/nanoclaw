@@ -27,6 +27,7 @@ import {
   openOutboundDbRw,
   replaceDestinations,
   retryWithBackoff,
+  getSessionRoutingRow,
   upsertSessionRouting,
 } from './session-db.js';
 import {
@@ -182,6 +183,16 @@ export function wrapSqliteInbound(db: Database.Database, nextSequence = () => ne
         platform_id: record.platformId,
         thread_id: record.threadId,
       });
+    },
+    getRouting: () => {
+      const row = getSessionRoutingRow(db);
+      return row
+        ? {
+            channelType: row.channel_type,
+            platformId: row.platform_id,
+            threadId: row.thread_id,
+          }
+        : null;
     },
     replaceDestinations: (entries) =>
       replaceDestinations(

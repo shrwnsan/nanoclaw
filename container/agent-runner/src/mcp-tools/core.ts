@@ -105,7 +105,11 @@ export const sendMessage: McpToolDefinition = {
     });
 
     log(`send_message: #${seq} → ${routing.resolvedName}`);
-    return ok(`Message sent to ${routing.resolvedName} (id: ${seq})`);
+    // Fork (#41): name the resolved thread so the model can verify routing —
+    // a bare confirmation reads as a misroute when the send landed in a
+    // dynamic or pinned topic the agent couldn't see.
+    const threadNote = routing.thread_id ? `, thread ${routing.thread_id}` : '';
+    return ok(`Message sent to ${routing.resolvedName}${threadNote} (id: ${seq})`);
   },
 };
 
@@ -154,7 +158,8 @@ export const sendFile: McpToolDefinition = {
     });
 
     log(`send_file: ${id} → ${routing.resolvedName} (${filename})`);
-    return ok(`File sent to ${routing.resolvedName} (id: ${id}, filename: ${filename})`);
+    const fileThreadNote = routing.thread_id ? `, thread ${routing.thread_id}` : '';
+    return ok(`File sent to ${routing.resolvedName}${fileThreadNote} (id: ${id}, filename: ${filename})`);
   },
 };
 

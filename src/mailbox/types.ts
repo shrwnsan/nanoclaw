@@ -92,6 +92,8 @@ export interface MailboxTimelineMessage {
 /** Host-visible inbound mailbox behavior. Storage layout and lifecycle are implementation-private. */
 export interface InboundMailbox {
   setRouting(routing: SessionRouting): void;
+  /** The routing row as last written, or null when never written. */
+  getRouting(): SessionRouting | null;
   replaceDestinations(entries: Destination[]): void;
   insertMessage(message: InboundMessage): Promise<void>;
   countDueMessages(): number;

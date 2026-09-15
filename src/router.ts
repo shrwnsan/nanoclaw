@@ -225,8 +225,13 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
   //    WhatsApp, iMessage, email) collapse threads to the channel. Resolved
   //    by the RECEIVING instance — sibling instances of one platform can
   //    differ in thread support.
+  //    Fork (shared-session topic routing): Telegram is EXEMPT — its adapter
+  //    declares supportsThreads=false, but our shared sessions deliver by
+  //    forum-topic thread at the delivery layer, so the event's topic id must
+  //    survive into messages_in. Flipping supportsThreads=true would give
+  //    per-thread SESSIONS (isolation), a different product.
   const adapter = getChannelAdapter(event.instance ?? event.channelType);
-  if (adapter && !adapter.supportsThreads) {
+  if (adapter && !adapter.supportsThreads && event.channelType !== 'telegram') {
     event = { ...event, threadId: null };
   }
 
@@ -388,7 +393,15 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
       mg.is_group === 1,
       supportsThreads,
     );
-    const effectiveThreadId = threadsEnabled ? event.threadId : null;
+    // Fork (shared-session topic routing): second thread gate. For telegram's
+    // supportsThreads=false, threadsEnabled resolves false and would null the
+    // topic id here AGAIN (the pre-strip above is not the only gate). Shared
+    // telegram sessions keep the event's topic in deliveryAddr — session
+    // identity is unaffected (resolveSession ignores the thread in shared
+    // mode); only messages_in rows carry it, which is what topic routing
+    // reads.
+    const effectiveThreadId =
+      threadsEnabled || (event.channelType === 'telegram' && !supportsThreads) ? event.threadId : null;
 
     const engages = await evaluateEngage(agent, messageText, isMention, mg, effectiveThreadId);
 

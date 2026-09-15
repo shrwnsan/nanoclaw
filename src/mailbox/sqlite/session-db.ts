@@ -56,6 +56,16 @@ export function upsertSessionRouting(
   ).run(routing);
 }
 
+/** Read the single session_routing row (or null when never written). */
+export function getSessionRoutingRow(
+  db: Database.Database,
+): { channel_type: string | null; platform_id: string | null; thread_id: string | null } | null {
+  const row = db.prepare('SELECT channel_type, platform_id, thread_id FROM session_routing WHERE id = 1').get() as
+    | { channel_type: string | null; platform_id: string | null; thread_id: string | null }
+    | undefined;
+  return row ?? null;
+}
+
 export interface DestinationRow {
   name: string;
   display_name: string | null;

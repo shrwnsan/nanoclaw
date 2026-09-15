@@ -9,6 +9,9 @@ import './core.js';
 import './interactive.js';
 import './agents.js';
 import './self-mod.js';
+// Fork: Telegram forum-topic management (create/edit topics). Self-gates on
+// TELEGRAM_BOT_TOKEN — a no-op registration on non-Telegram installs.
+import './telegram-topics.js';
 // Module barrel — loads registration modules, including the singular mailbox slot.
 import '../modules/index.js';
 import { getAgentMailbox, readMailboxContext } from '../mailbox/index.js';
