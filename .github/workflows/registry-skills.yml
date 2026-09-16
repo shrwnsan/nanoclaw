@@ -21,6 +21,7 @@ permissions:
 
 jobs:
   discover:
+    if: github.repository == 'nanocoai/nanoclaw'
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.skills.outputs.matrix }}
@@ -72,6 +73,7 @@ jobs:
           echo "providers=$providers" >> "$GITHUB_OUTPUT"
 
   test:
+    if: github.repository == 'nanocoai/nanoclaw'
     needs: discover
     runs-on: ubuntu-latest
     strategy:
@@ -100,6 +102,7 @@ jobs:
         run: pnpm exec tsx scripts/test-registry-skills.ts "${{ matrix.skill }}"
 
   combined-providers:
+    if: github.repository == 'nanocoai/nanoclaw'
     needs: discover
     runs-on: ubuntu-latest
     steps:
@@ -122,6 +125,7 @@ jobs:
         run: pnpm exec tsx scripts/test-registry-skills.ts --combined-providers
 
   pre-contract-providers:
+    if: github.repository == 'nanocoai/nanoclaw'
     needs: discover
     runs-on: ubuntu-latest
     steps:
@@ -141,6 +145,7 @@ jobs:
         run: pnpm exec tsx scripts/test-registry-skills.ts --pre-contract-providers
 
   old-provider-refresh:
+    if: github.repository == 'nanocoai/nanoclaw'
     needs: discover
     runs-on: ubuntu-latest
     steps:
@@ -163,7 +168,7 @@ jobs:
         run: pnpm exec tsx scripts/test-registry-skills.ts --old-provider-refresh 99283f3e274b2b1dae47b141ac4f11f56ad8eb2d
 
   provider-promotion:
-    if: always()
+    if: github.repository == 'nanocoai/nanoclaw' && (always())
     needs: [test, combined-providers, pre-contract-providers, old-provider-refresh]
     runs-on: ubuntu-latest
     steps:

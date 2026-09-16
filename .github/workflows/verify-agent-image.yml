@@ -35,6 +35,7 @@ permissions:
 
 jobs:
   verify:
+    if: github.repository == 'nanocoai/nanoclaw'
     runs-on: ubuntu-latest
     permissions:
       contents: read
