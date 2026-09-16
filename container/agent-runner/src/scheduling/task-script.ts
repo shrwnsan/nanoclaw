@@ -4,7 +4,10 @@ import path from 'node:path';
 import type { MessageInRow } from '../db/messages-in.js';
 import { touchHeartbeat } from '../heartbeat.js';
 
-const SCRIPT_TIMEOUT_MS = 30_000;
+// Fork (restores the dropped #33 default): scripts scrape, build, and publish
+// — 30s cut real runs off mid-flight. The fork shipped a 5-minute default
+// (configurable to 25); restore the 5-minute floor.
+const SCRIPT_TIMEOUT_MS = 5 * 60 * 1000;
 const SCRIPT_MAX_BUFFER = 1024 * 1024;
 
 export interface ScriptResult {
