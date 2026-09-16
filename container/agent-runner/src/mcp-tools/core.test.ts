@@ -1,50 +1,98 @@
 /**
- * Tests for the core MCP tools' interaction with the per-batch routing
- * context. The agent-runner publishes the batch's RoutingContext at the
- * top of each batch in poll-loop, and outbound writes from MCP tools
- * (send_message, send_file) must pick it up:
+ * Tests for the core MCP tools' routing context: the a2a reply stamp and the
+ * thread an outbound row is addressed to.
  *
- * - in_reply_to, so a2a return-path routing on the host can correlate
- *   replies back to the originating session.
- * - thread_id for no-`to` sends, so they land in the thread the batch
- *   came from (interactive topic or task target) instead of the shared
- *   session's null default (Telegram "General").
+ * The in_reply_to stamp is published through session_state in outbound.db, not
+ * module state — the MCP server runs as a separate stdio subprocess from the
+ * poll loop, so it can only see the stamp through the shared DB. These tests
+ * seed it the same way the poll-loop process does (a direct DB write) rather
+ * than via any in-memory helper, so they exercise the real process boundary.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
-import * as fs from 'node:fs';
+import { describe, it, expect, beforeEach, afterEach, spyOn } from 'bun:test';
+import fs from 'fs';
 
-import { initTestSessionDb, closeSessionDb, getInboundDb } from '../db/connection.js';
+import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from '../mailbox/sqlite/connection.js';
 import { getUndeliveredMessages } from '../db/messages-out.js';
-import { setCurrentBatchRouting, clearCurrentBatchRouting, CURRENT_BATCH_FILE } from '../current-batch.js';
-import type { RoutingContext } from '../formatter.js';
-import { sendMessage } from './core.js';
+import { sendFile, sendMessage } from './core.js';
 
-function batch(routing: Partial<RoutingContext>): RoutingContext {
-  return { platformId: null, channelType: null, threadId: null, inReplyTo: null, kind: null, ...routing };
+/**
+ * Publish the reply stamp the way the poll loop does: a direct write to
+ * session_state in outbound.db.
+ */
+function publishReplyRoute(
+  route: { inReplyTo: string; channelType?: string | null; platformId?: string | null; threadId?: string | null },
+  ageMs = 0,
+): void {
+  const updatedAt = new Date(Date.now() - ageMs).toISOString();
+  getOutboundDb()
+    .prepare('INSERT OR REPLACE INTO session_state (key, value, updated_at) VALUES (?, ?, ?)')
+    .run(
+      'current_reply_route',
+      JSON.stringify({
+        inReplyTo: route.inReplyTo,
+        channelType: route.channelType ?? null,
+        platformId: route.platformId ?? null,
+        threadId: route.threadId ?? null,
+      }),
+      updatedAt,
+    );
 }
 
-/** Seed session_routing + a sole `alerts` channel destination with a topic thread. */
-function seedSharedSessionWithAlertsDest(): void {
-  getInboundDb().exec(`
-    CREATE TABLE IF NOT EXISTS session_routing (
-      id INTEGER PRIMARY KEY,
-      channel_type TEXT,
-      platform_id TEXT,
-      thread_id TEXT
-    );
-    INSERT INTO session_routing (id, channel_type, platform_id, thread_id)
-    VALUES (1, 'telegram', 'telegram:-100', NULL);
-  `);
+function publishInReplyTo(id: string, ageMs = 0): void {
+  publishReplyRoute({ inReplyTo: id }, ageMs);
+}
+
+/** The session's bound chat/thread, as the host writes it on every wake. */
+function seedBoundThread(channelType: string, platformId: string, threadId: string | null): void {
+  const db = getInboundDb();
+  db.exec(`CREATE TABLE IF NOT EXISTS session_routing (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    channel_type TEXT, platform_id TEXT, thread_id TEXT
+  )`);
+  db.prepare('INSERT INTO session_routing (id, channel_type, platform_id, thread_id) VALUES (1, ?, ?, ?)').run(
+    channelType,
+    platformId,
+    threadId,
+  );
+}
+
+function seedChannelDestination(name: string, channelType: string, platformId: string): void {
   getInboundDb()
     .prepare(
-      `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id, thread_id)
-       VALUES ('alerts', 'Alerts', 'channel', 'telegram', 'telegram:-100', NULL, 'telegram:-100:51')`,
+      `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
+       VALUES (?, ?, 'channel', ?, ?, NULL)`,
     )
-    .run();
+    .run(name, name, channelType, platformId);
+}
+
+let hostSeq = 0;
+
+/**
+ * An inbound row as the host routes it. `seq` steps by two because the host
+ * owns even sequence numbers and the container odd ones — that parity is what
+ * `getMessageIdBySeq` routes on, so an odd inbound row could never exist.
+ */
+function seedInbound(id: string, channelType: string, platformId: string, threadId: string | null): void {
+  hostSeq += 2;
+  getInboundDb()
+    .prepare(
+      `INSERT INTO messages_in (id, seq, kind, timestamp, status, platform_id, channel_type, thread_id, content)
+       VALUES (?, ?, 'chat', ?, 'completed', ?, ?, ?, ?)`,
+    )
+    .run(
+      id,
+      hostSeq,
+      new Date().toISOString(),
+      platformId,
+      channelType,
+      threadId,
+      JSON.stringify({ sender: 'Alice', text: 'hi' }),
+    );
 }
 
 beforeEach(() => {
   initTestSessionDb();
+  hostSeq = 0;
   // Seed a peer agent destination
   getInboundDb()
     .prepare(
@@ -55,13 +103,12 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  clearCurrentBatchRouting();
   closeSessionDb();
 });
 
 describe('send_message MCP tool — in_reply_to plumbing', () => {
-  it('stamps current batch in_reply_to on outbound rows', async () => {
-    setCurrentBatchRouting(batch({ inReplyTo: 'inbound-msg-1' }));
+  it('stamps the batch in_reply_to (published via the DB) on outbound rows', async () => {
+    publishInReplyTo('inbound-msg-1');
 
     await sendMessage.handler({ to: 'peer', text: 'hello' });
 
@@ -71,166 +118,90 @@ describe('send_message MCP tool — in_reply_to plumbing', () => {
   });
 
   it('writes null when no batch is active', async () => {
-    // No setCurrentBatchRouting before this call — simulates ad-hoc / out-of-batch invocation.
+    // Nothing published to session_state — simulates ad-hoc / out-of-batch invocation.
     await sendMessage.handler({ to: 'peer', text: 'hello' });
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
     expect(out[0].in_reply_to).toBeNull();
   });
-});
 
-describe('send_message MCP tool — no-`to` thread resolution (shared sessions)', () => {
-  it("lands in the batch's topic, not the platform default", async () => {
-    seedSharedSessionWithAlertsDest();
-    setCurrentBatchRouting(
-      batch({ channelType: 'telegram', platformId: 'telegram:-100', threadId: 'telegram:-100:179', kind: 'chat' }),
-    );
+  it('honors a stamp of any age — a turn may run longer than any fixed limit (dead stamps are cleared at startup, see turn-routing.test.ts)', async () => {
+    publishInReplyTo('inbound-msg-1', 3 * 60 * 60 * 1000); // three hours into the turn
 
-    await sendMessage.handler({ text: 'mid-turn update' });
+    await sendMessage.handler({ to: 'peer', text: 'hello' });
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
-    expect(out[0].thread_id).toBe('telegram:-100:179');
-  });
-
-  it("uses a task batch's target topic", async () => {
-    seedSharedSessionWithAlertsDest();
-    setCurrentBatchRouting(
-      batch({ channelType: 'telegram', platformId: 'telegram:-100', threadId: 'telegram:-100:51', kind: 'task' }),
-    );
-
-    const result = (await sendMessage.handler({ text: 'briefing progress' })) as { content: { text: string }[] };
-    expect(result.content[0].text).toContain('sent to alerts');
-
-    const out = getUndeliveredMessages();
-    expect(out).toHaveLength(1);
-    expect(out[0].thread_id).toBe('telegram:-100:51');
-  });
-
-  it("reports the topic for threads that match no destination's configured thread", async () => {
-    seedSharedSessionWithAlertsDest();
-    setCurrentBatchRouting(
-      batch({ channelType: 'telegram', platformId: 'telegram:-100', threadId: 'telegram:-100:179', kind: 'chat' }),
-    );
-
-    const result = (await sendMessage.handler({ text: 'mid-turn update' })) as { content: { text: string }[] };
-    expect(result.content[0].text).toContain('topic telegram:-100:179');
-  });
-
-  it('falls back to the sole same-channel destination thread for legacy threadless task batches', async () => {
-    seedSharedSessionWithAlertsDest();
-    setCurrentBatchRouting(batch({ channelType: 'telegram', platformId: 'telegram:-100', threadId: null, kind: 'task' }));
-
-    await sendMessage.handler({ text: 'briefing progress' });
-
-    const out = getUndeliveredMessages();
-    expect(out).toHaveLength(1);
-    expect(out[0].thread_id).toBe('telegram:-100:51');
-  });
-
-  it('keeps session_routing thread when no batch is active (regression guard)', async () => {
-    seedSharedSessionWithAlertsDest();
-
-    await sendMessage.handler({ text: 'out-of-batch send' });
-
-    const out = getUndeliveredMessages();
-    expect(out).toHaveLength(1);
-    expect(out[0].thread_id).toBeNull();
-  });
-
-  it('ignores a batch from a different channel', async () => {
-    seedSharedSessionWithAlertsDest();
-    setCurrentBatchRouting(
-      batch({ channelType: 'slack', platformId: 'slack:T1', threadId: 'slack:T1:99', kind: 'chat' }),
-    );
-
-    await sendMessage.handler({ text: 'mid-turn update' });
-
-    const out = getUndeliveredMessages();
-    expect(out).toHaveLength(1);
-    expect(out[0].thread_id).toBeNull();
-  });
-
-  it("still prefers the destination's configured thread when `to` is explicit", async () => {
-    seedSharedSessionWithAlertsDest();
-    setCurrentBatchRouting(
-      batch({ channelType: 'telegram', platformId: 'telegram:-100', threadId: 'telegram:-100:179', kind: 'chat' }),
-    );
-
-    await sendMessage.handler({ to: 'alerts', text: 'targeted briefing' });
-
-    const out = getUndeliveredMessages();
-    expect(out).toHaveLength(1);
-    expect(out[0].thread_id).toBe('telegram:-100:51');
-  });
-
-  it('explicit `to` a threadless same-channel dest uses the batch thread, not General', async () => {
-    seedSharedSessionWithAlertsDest();
-    // Main channel dest with no configured thread (My Claw Squad-style)
-    getInboundDb()
-      .prepare(
-        `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
-         VALUES ('fam', 'Family', 'channel', 'telegram', 'telegram:-100', NULL)`,
-      )
-      .run();
-    setCurrentBatchRouting(
-      batch({ channelType: 'telegram', platformId: 'telegram:-100', threadId: 'telegram:-100:179', kind: 'chat' }),
-    );
-
-    await sendMessage.handler({ to: 'fam', text: 'mid-turn update' });
-
-    const out = getUndeliveredMessages();
-    expect(out).toHaveLength(1);
-    expect(out[0].thread_id).toBe('telegram:-100:179');
+    expect(out[0].in_reply_to).toBe('inbound-msg-1');
   });
 });
 
-describe('send_message MCP tool — cross-process sidecar', () => {
-  // The nanoclaw MCP server runs as a stdio child process (index.ts) — its
-  // module state is always empty, so its lookups go through the sidecar
-  // file the poll loop mirrors batch routing into. Simulate the child by
-  // writing the file directly with no module state set.
-  it('routes no-`to` sends from the sidecar file when module state is empty', async () => {
-    seedSharedSessionWithAlertsDest();
-    fs.writeFileSync(
-      CURRENT_BATCH_FILE,
-      JSON.stringify(
-        batch({ channelType: 'telegram', platformId: 'telegram:-100', threadId: 'telegram:-100:51', kind: 'task' }),
-      ),
-    );
-    try {
-      await sendMessage.handler({ text: 'briefing progress' });
-    } finally {
-      fs.rmSync(CURRENT_BATCH_FILE, { force: true });
-    }
+describe('send_message / send_file — thread for a channel destination', () => {
+  // send_file stages the file under /workspace/outbox, which only exists in a
+  // container. Routing is what's under test, so stub the copy.
+  let fsSpies: Array<{ mockRestore(): void }> = [];
 
-    const out = getUndeliveredMessages();
-    expect(out).toHaveLength(1);
-    expect(out[0].thread_id).toBe('telegram:-100:51');
+  beforeEach(() => {
+    seedChannelDestination('current-chat', 'slack', 'C123');
+    fsSpies = [
+      spyOn(fs, 'existsSync').mockReturnValue(true),
+      spyOn(fs, 'mkdirSync').mockReturnValue(undefined),
+      spyOn(fs, 'copyFileSync').mockReturnValue(undefined),
+    ];
   });
 
-  it('stamps in_reply_to from the sidecar file (a2a return path)', async () => {
-    seedSharedSessionWithAlertsDest();
-    fs.writeFileSync(
-      CURRENT_BATCH_FILE,
-      JSON.stringify(batch({ channelType: 'telegram', platformId: 'telegram:-100', inReplyTo: 'inbound-msg-9' })),
-    );
-    try {
-      await sendMessage.handler({ text: 'hello' });
-    } finally {
-      fs.rmSync(CURRENT_BATCH_FILE, { force: true });
-    }
-
-    const out = getUndeliveredMessages();
-    expect(out).toHaveLength(1);
-    expect(out[0].in_reply_to).toBe('inbound-msg-9');
+  afterEach(() => {
+    for (const spy of fsSpies) spy.mockRestore();
   });
 
-  it('clearCurrentBatchRouting removes the sidecar so post-batch sends see no batch', () => {
-    setCurrentBatchRouting(batch({ channelType: 'telegram', platformId: 'telegram:-100', kind: 'task' }));
-    expect(fs.existsSync(CURRENT_BATCH_FILE)).toBe(true);
-    clearCurrentBatchRouting();
-    expect(fs.existsSync(CURRENT_BATCH_FILE)).toBe(false);
+  async function sendBoth(): Promise<Array<string | null>> {
+    await sendMessage.handler({ to: 'current-chat', text: 'hello' });
+    const file = (await sendFile.handler({ to: 'current-chat', path: '/tmp/report.txt' })) as { isError?: boolean };
+    expect(file.isError).toBeUndefined();
+    return getUndeliveredMessages().map((m) => m.thread_id);
+  }
+
+  it('replies in the thread of the message being answered, even when the session has no bound thread', async () => {
+    // A shared / agent-shared session (or a DM sub-thread) is bound to the
+    // channel with no thread of its own, but the request came in a thread.
+    // The old code read the bound thread and sent the file to the top level.
+    seedBoundThread('slack', 'C123', null);
+    seedInbound('in-1', 'slack', 'C123', 'T-42');
+    publishReplyRoute({ inReplyTo: 'in-1', channelType: 'slack', platformId: 'C123', threadId: 'T-42' });
+
+    expect(await sendBoth()).toEqual(['T-42', 'T-42']);
+  });
+
+  it('keeps replying to the answered message when a newer message from another thread arrived mid-turn', async () => {
+    seedInbound('in-1', 'slack', 'C123', 'T-1');
+    seedInbound('in-2', 'slack', 'C123', 'T-42');
+    publishReplyRoute({ inReplyTo: 'in-1', channelType: 'slack', platformId: 'C123', threadId: 'T-1' });
+
+    expect(await sendBoth()).toEqual(['T-1', 'T-1']);
+  });
+
+  it("ignores the session's bound thread and falls back to the latest inbound thread out of a batch", async () => {
+    seedBoundThread('slack', 'C123', 'T-bound');
+    seedInbound('in-1', 'slack', 'C123', 'T-1');
+    seedInbound('in-2', 'slack', 'C123', 'T-42');
+
+    expect(await sendBoth()).toEqual(['T-42', 'T-42']);
+  });
+
+  it("uses the destination channel's own latest thread when answering a message from another channel", async () => {
+    // agent-shared session: answering discord, sending to slack.
+    seedInbound('in-0', 'slack', 'C123', 'T-9');
+    seedInbound('in-1', 'discord', 'chan-9', 'discord-thread');
+    publishReplyRoute({ inReplyTo: 'in-1', channelType: 'discord', platformId: 'chan-9', threadId: 'discord-thread' });
+
+    expect(await sendBoth()).toEqual(['T-9', 'T-9']);
+  });
+
+  it('sends unthreaded to a channel nothing has arrived from', async () => {
+    seedInbound('in-1', 'discord', 'chan-9', 'discord-thread');
+    publishReplyRoute({ inReplyTo: 'in-1', channelType: 'discord', platformId: 'chan-9', threadId: 'discord-thread' });
+
+    expect(await sendBoth()).toEqual([null, null]);
   });
 });

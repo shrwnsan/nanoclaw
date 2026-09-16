@@ -2,29 +2,17 @@ import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { MessageInRow } from '../db/messages-in.js';
-import { touchHeartbeat } from '../db/connection.js';
+import { touchHeartbeat } from '../heartbeat.js';
 
-// Default cap for a pre-task script. Was 30s, which silently killed legitimate
-// long-ish scripts on a slow run — e.g. JobWire's daily scrape budgets 30 min
-// internally and normally finishes in ~15-20s, but a slow day pushes it past
-// 30s → task skipped with no notification. 5 min covers slow runs with margin.
-const DEFAULT_SCRIPT_TIMEOUT_MS = 5 * 60 * 1000;
-// Hard ceiling for a per-script timeout override. Must stay under the host's
-// 30-min container kill ceiling (config.CONTAINER_TIMEOUT) so a long script
-// can't run so long the host reaps the container mid-script.
-const MAX_SCRIPT_TIMEOUT_MS = 25 * 60 * 1000;
+// Fork (restores the dropped #33 default): scripts scrape, build, and publish
+// — 30s cut real runs off mid-flight. The fork shipped a 5-minute default
+// (configurable to 25); restore the 5-minute floor.
+const SCRIPT_TIMEOUT_MS = 5 * 60 * 1000;
 const SCRIPT_MAX_BUFFER = 1024 * 1024;
-const SCRIPT_RETRY_DELAY_MS = 3_000;
 
 export interface ScriptResult {
   wakeAgent: boolean;
   data?: unknown;
-}
-
-export interface ScriptFailure {
-  reason: string; // Human-readable: error.message, 'no output', etc.
-  exitCode?: number; // Bash exit code (e.g. curl 6=DNS, 28=timeout)
-  nodeError?: string; // Node error code ('ENOENT', 'ETIMEDOUT')
 }
 
 function log(msg: string): void {
@@ -34,15 +22,23 @@ function log(msg: string): void {
 export async function runScript(
   script: string,
   taskId: string,
-  timeoutMs: number = DEFAULT_SCRIPT_TIMEOUT_MS,
-): Promise<ScriptResult | ScriptFailure> {
+  timeoutMs: number = SCRIPT_TIMEOUT_MS,
+): Promise<ScriptResult | null> {
   const scriptPath = path.join('/tmp', `task-script-${taskId}.sh`);
   fs.writeFileSync(scriptPath, script, { mode: 0o755 });
 
+  // Honor the script's own shebang (fork): a task script starting with `#!`
+  // is executed directly so the kernel resolves its interpreter — a
+  // `#!/usr/bin/env node` task runs under node, not bash. Everything else
+  // keeps the historical `bash <file>` invocation. Forcing bash on a
+  // shebang'd script makes bash parse the interpreter line as a comment and
+  // the script body as shell, which fails every run.
+  const hasShebang = script.startsWith('#!');
+
   return new Promise((resolve) => {
     execFile(
-      'bash',
-      [scriptPath],
+      hasShebang ? scriptPath : 'bash',
+      hasShebang ? [] : [scriptPath],
       { timeout: timeoutMs, maxBuffer: SCRIPT_MAX_BUFFER, env: process.env },
       (error, stdout, stderr) => {
         try {
@@ -56,52 +52,61 @@ export async function runScript(
         }
 
         if (error) {
-          log(`[${taskId}] error: ${error.message}`);
-          return resolve({
-            reason: error.message,
-            exitCode: 'status' in error ? (error as { status?: number }).status : undefined,
-            nodeError: 'code' in error ? (error as { code?: string }).code : undefined,
-          });
+          // execFile kills on timeout, so a script that ran too long arrives
+          // here as a generic "Command failed" — indistinguishable from one
+          // that exited non-zero on its first line. `killed` is what separates
+          // them; say which happened, and name the ceiling that was hit.
+          if ((error as { killed?: boolean }).killed) {
+            log(`[${taskId}] timed out after ${timeoutMs}ms and was killed; output discarded`);
+          } else {
+            log(`[${taskId}] error: ${error.message}`);
+          }
+          return resolve(null);
         }
 
         const lines = stdout.trim().split('\n');
         const lastLine = lines[lines.length - 1];
         if (!lastLine) {
           log(`[${taskId}] no output`);
-          return resolve({ reason: 'no output' });
+          return resolve(null);
         }
 
         try {
           const result = JSON.parse(lastLine);
           if (typeof result.wakeAgent !== 'boolean') {
             log(`[${taskId}] output missing wakeAgent boolean: ${lastLine.slice(0, 200)}`);
-            return resolve({ reason: 'output missing wakeAgent boolean' });
+            return resolve(null);
           }
           resolve(result as ScriptResult);
         } catch {
           log(`[${taskId}] output is not valid JSON: ${lastLine.slice(0, 200)}`);
-          resolve({ reason: 'invalid JSON' });
+          resolve(null);
         }
       },
     );
   });
 }
 
+/** Why a script gated its task: deliberate wakeAgent=false vs a broken script. */
+export type ScriptSkipReason = 'gated' | 'error';
+
 export interface TaskScriptOutcome {
   keep: MessageInRow[];
-  skipped: string[];
+  skipped: Array<{ id: string; reason: ScriptSkipReason }>;
 }
 
 /**
  * Run pre-task scripts for any task messages that carry one, serially.
- * - Errors / missing output / wakeAgent=false → task id added to `skipped`.
+ * - Errors / missing output / wakeAgent=false → task id added to `skipped`,
+ *   with the reason. The caller acks these as script-skips (not plain
+ *   completions) so the host can count consecutive failures and back off.
  * - wakeAgent=true → content JSON is mutated to carry `scriptOutput`, so the
  *   formatter renders it into the prompt.
  * Non-task messages and tasks without scripts pass through unchanged.
  */
 export async function applyPreTaskScripts(messages: MessageInRow[]): Promise<TaskScriptOutcome> {
   const keep: MessageInRow[] = [];
-  const skipped: string[] = [];
+  const skipped: Array<{ id: string; reason: ScriptSkipReason }> = [];
 
   for (const msg of messages) {
     if (msg.kind !== 'task') {
@@ -123,43 +128,15 @@ export async function applyPreTaskScripts(messages: MessageInRow[]): Promise<Tas
       continue;
     }
 
-    // Per-script timeout override (clamped under the ceiling). Lets genuinely
-    // long scripts (scrapes, builds) declare what they need instead of being
-    // capped at the default.
-    const declaredTimeout =
-      typeof content.scriptTimeoutMs === 'number' && Number.isFinite(content.scriptTimeoutMs)
-        ? content.scriptTimeoutMs
-        : null;
-    const timeoutMs = declaredTimeout
-      ? Math.min(Math.max(declaredTimeout, 1000), MAX_SCRIPT_TIMEOUT_MS)
-      : DEFAULT_SCRIPT_TIMEOUT_MS;
-
     log(`running script for task ${msg.id}`);
     touchHeartbeat();
-    let result = await runScript(script, msg.id, timeoutMs);
+    const result = await runScript(script, msg.id);
     touchHeartbeat();
 
-    // Retry once on failure. We retry all failures (not just "transient")
-    // because perfect classification is impossible — network failures like
-    // curl exit 6/7/28 look identical to bash syntax errors from execFile's
-    // perspective — and the cost of a false retry is low (max 30s).
-    if ('reason' in result) {
-      log(`task ${msg.id} script failed (${result.reason}), retrying in ${SCRIPT_RETRY_DELAY_MS / 1000}s`);
-      touchHeartbeat();
-      await new Promise((r) => setTimeout(r, SCRIPT_RETRY_DELAY_MS));
-      result = await runScript(script, msg.id, timeoutMs);
-      touchHeartbeat();
-    }
-
-    if ('reason' in result) {
-      log(`task ${msg.id} skipped: script error (${result.reason})`);
-      skipped.push(msg.id);
-      continue;
-    }
-
-    if (!result.wakeAgent) {
-      log(`task ${msg.id} skipped: wakeAgent=false`);
-      skipped.push(msg.id);
+    if (!result || !result.wakeAgent) {
+      const reason: ScriptSkipReason = result ? 'gated' : 'error';
+      log(`task ${msg.id} skipped: ${reason === 'gated' ? 'wakeAgent=false' : 'script error, timeout, or no output'}`);
+      skipped.push({ id: msg.id, reason });
       continue;
     }
 

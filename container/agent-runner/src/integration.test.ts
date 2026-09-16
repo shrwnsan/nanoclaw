@@ -1,11 +1,18 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
-import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './db/connection.js';
+import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './mailbox/sqlite/connection.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { getPendingMessages } from './db/messages-in.js';
 import { getContinuation, setContinuation } from './db/session-state.js';
+import { getSessionRouting } from './db/session-routing.js';
 import { MockProvider } from './providers/mock.js';
+import type { ProviderExchange } from './providers/types.js';
 import { runPollLoop } from './poll-loop.js';
+
+const MOCK_PROVIDER_CONTRACT = {
+  textDelivery: 'mid-turn-complete',
+  commands: { formatting: 'xml' },
+} as const;
 
 beforeEach(() => {
   initTestSessionDb();
@@ -22,7 +29,11 @@ afterEach(() => {
   closeSessionDb();
 });
 
-function insertMessage(id: string, content: object, opts?: { platformId?: string; channelType?: string; threadId?: string }) {
+function insertMessage(
+  id: string,
+  content: object,
+  opts?: { platformId?: string; channelType?: string; threadId?: string },
+) {
   getInboundDb()
     .prepare(
       `INSERT INTO messages_in (id, kind, timestamp, status, platform_id, channel_type, thread_id, content)
@@ -32,8 +43,19 @@ function insertMessage(id: string, content: object, opts?: { platformId?: string
 }
 
 describe('poll loop integration', () => {
+  it('defaults only when the legacy session routing table is absent', () => {
+    expect(getSessionRouting()).toEqual({ channel_type: null, platform_id: null, thread_id: null });
+
+    getInboundDb().exec('CREATE VIEW session_routing AS SELECT * FROM missing_routing');
+    expect(() => getSessionRouting()).toThrow(/missing_routing/);
+  });
+
   it('should pick up a message, process it, and write a response', async () => {
-    insertMessage('m1', { sender: 'Alice', text: 'What is the meaning of life?' }, { platformId: 'chan-1', channelType: 'discord', threadId: 'thread-1' });
+    insertMessage(
+      'm1',
+      { sender: 'Alice', text: 'What is the meaning of life?' },
+      { platformId: 'chan-1', channelType: 'discord', threadId: 'thread-1' },
+    );
 
     const provider = new MockProvider({}, () => '<message to="discord-test">42</message>');
 
@@ -85,12 +107,21 @@ describe('poll loop integration', () => {
       .run();
 
     // Insert messages from each destination with distinct thread IDs
-    insertMessage('m-discord', { sender: 'Alice', text: 'from discord' }, { platformId: 'chan-1', channelType: 'discord', threadId: 'discord-thread-1' });
-    insertMessage('m-slack', { sender: 'Bob', text: 'from slack' }, { platformId: 'chan-2', channelType: 'slack', threadId: 'slack-thread-99' });
+    insertMessage(
+      'm-discord',
+      { sender: 'Alice', text: 'from discord' },
+      { platformId: 'chan-1', channelType: 'discord', threadId: 'discord-thread-1' },
+    );
+    insertMessage(
+      'm-slack',
+      { sender: 'Bob', text: 'from slack' },
+      { platformId: 'chan-2', channelType: 'slack', threadId: 'slack-thread-99' },
+    );
 
     // Agent replies to both destinations
-    const provider = new MockProvider({}, () =>
-      '<message to="discord-test">reply-d</message><message to="slack-test">reply-s</message>',
+    const provider = new MockProvider(
+      {},
+      () => '<message to="discord-test">reply-d</message><message to="slack-test">reply-s</message>',
     );
     const controller = new AbortController();
     const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 2000);
@@ -113,7 +144,7 @@ describe('poll loop integration', () => {
     await loopPromise.catch(() => {});
   });
 
-  it('bare text with single destination is sent as fallback', async () => {
+  it('bare text produces no outbound messages (scratchpad only)', async () => {
     insertMessage('m1', { sender: 'Alice', text: 'hello' }, { platformId: 'chan-1', channelType: 'discord' });
 
     // Agent responds with bare text — no <message to="..."> wrapping
@@ -126,8 +157,7 @@ describe('poll loop integration', () => {
     controller.abort();
 
     const out = getUndeliveredMessages();
-    expect(out).toHaveLength(1);
-    expect(JSON.parse(out[0].content).text).toBe('I am thinking about this...');
+    expect(out).toHaveLength(0);
 
     await loopPromise.catch(() => {});
   });
@@ -196,7 +226,11 @@ describe('poll loop integration', () => {
       .run();
 
     // Only insert a message from discord — slack-new has never sent anything
-    insertMessage('m1', { sender: 'Alice', text: 'tell slack' }, { platformId: 'chan-1', channelType: 'discord', threadId: 'discord-thread' });
+    insertMessage(
+      'm1',
+      { sender: 'Alice', text: 'tell slack' },
+      { platformId: 'chan-1', channelType: 'discord', threadId: 'discord-thread' },
+    );
 
     const provider = new MockProvider({}, () => '<message to="slack-new">hello slack</message>');
     const controller = new AbortController();
@@ -213,10 +247,19 @@ describe('poll loop integration', () => {
     await loopPromise.catch(() => {});
   });
 
-  it('resolves most recent thread_id when destination has multiple inbound messages', async () => {
-    // Two messages from same destination, different threads
-    insertMessage('m-old', { sender: 'Alice', text: 'old' }, { platformId: 'chan-1', channelType: 'discord', threadId: 'thread-old' });
-    insertMessage('m-new', { sender: 'Alice', text: 'new' }, { platformId: 'chan-1', channelType: 'discord', threadId: 'thread-new' });
+  it('replies in the thread of the message the batch is answering when the batch spans threads', async () => {
+    // Two messages from the same channel, different threads, one batch. The
+    // reply goes where in_reply_to points: the first non-echo message.
+    insertMessage(
+      'm-old',
+      { sender: 'Alice', text: 'old' },
+      { platformId: 'chan-1', channelType: 'discord', threadId: 'thread-old' },
+    );
+    insertMessage(
+      'm-new',
+      { sender: 'Alice', text: 'new' },
+      { platformId: 'chan-1', channelType: 'discord', threadId: 'thread-new' },
+    );
 
     const provider = new MockProvider({}, () => '<message to="discord-test">reply</message>');
     const controller = new AbortController();
@@ -227,8 +270,8 @@ describe('poll loop integration', () => {
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
-    expect(out[0].thread_id).toBe('thread-new');
-    expect(out[0].in_reply_to).toBe('m-new');
+    expect(out[0].thread_id).toBe('thread-old');
+    expect(out[0].in_reply_to).toBe('m-old');
 
     await loopPromise.catch(() => {});
   });
@@ -256,7 +299,8 @@ describe('poll loop integration', () => {
 
     const provider = new MockProvider(
       {},
-      () => '<internal>thinking about this...</internal><message to="discord-test">answer</message><internal>done thinking</internal>',
+      () =>
+        '<internal>thinking about this...</internal><message to="discord-test">answer</message><internal>done thinking</internal>',
     );
     const controller = new AbortController();
     const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 2000);
@@ -295,65 +339,6 @@ describe('poll loop integration', () => {
 
     await loopPromise.catch(() => {});
   });
-
-  it('task with thread_id routes outbound to that thread', async () => {
-    // Simulates a scheduled task that carries thread_id (e.g. a weather
-    // briefing targeting a specific Telegram forum topic).
-    // A stale user message from a different topic should NOT win — the
-    // task's thread_id is the latest message_in and resolveDestinationThread
-    // should return it.
-    getInboundDb()
-      .prepare(
-        `INSERT INTO messages_in (id, kind, timestamp, status, platform_id, channel_type, thread_id, content)
-         VALUES ('t-weather', 'task', datetime('now'), 'pending', 'chan-1', 'discord', 'topic-51', ?)`,
-      )
-      .run(JSON.stringify({ prompt: 'weather briefing' }));
-
-    const provider = new MockProvider({}, () => '<message to="discord-test">Sunny, 25°C</message>');
-    const controller = new AbortController();
-    const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 2000);
-
-    await waitFor(() => getUndeliveredMessages().length > 0, 2000);
-    controller.abort();
-
-    const out = getUndeliveredMessages();
-    expect(out).toHaveLength(1);
-    expect(out[0].thread_id).toBe('topic-51');
-    expect(out[0].in_reply_to).toBe('t-weather');
-
-    await loopPromise.catch(() => {});
-  });
-
-  it('task thread_id takes priority over stale user message thread', async () => {
-    // Stale user message on topic-A, then a task with thread_id targeting topic-B.
-    // resolveDestinationThread picks the latest (the task), so outbound should
-    // go to topic-B, not topic-A.
-    insertMessage('m-old', { sender: 'Alice', text: 'from topic A' }, { platformId: 'chan-1', channelType: 'discord', threadId: 'topic-A' });
-
-    // Insert task with a higher seq (it's inserted after, so SQLite gives it a higher rowid)
-    // We use the insert helper pattern but force kind='task'
-    getInboundDb()
-      .prepare(
-        `INSERT INTO messages_in (id, kind, timestamp, status, platform_id, channel_type, thread_id, content)
-         VALUES ('t-target', 'task', datetime('now'), 'pending', 'chan-1', 'discord', 'topic-B', ?)`,
-      )
-      .run(JSON.stringify({ prompt: 'go to topic B' }));
-
-    const provider = new MockProvider({}, () => '<message to="discord-test">dispatched to B</message>');
-    const controller = new AbortController();
-    const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 2000);
-
-    await waitFor(() => getUndeliveredMessages().length > 0, 2000);
-    controller.abort();
-
-    const out = getUndeliveredMessages();
-    expect(out).toHaveLength(1);
-    expect(out[0].thread_id).toBe('topic-B');
-    expect(out[0].in_reply_to).toBe('t-target');
-
-    await loopPromise.catch(() => {});
-  });
-
 });
 
 // Helper: run poll loop until aborted or timeout
@@ -361,8 +346,10 @@ async function runPollLoopWithTimeout(provider: MockProvider, signal: AbortSigna
   return Promise.race([
     runPollLoop({
       provider,
+      providerContract: MOCK_PROVIDER_CONTRACT,
       providerName: 'mock',
       cwd: '/tmp',
+      signal,
     }),
     new Promise<void>((_, reject) => {
       signal.addEventListener('abort', () => reject(new Error('aborted')));
@@ -383,8 +370,96 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+describe('poll loop — exchange hook (onExchangeComplete)', () => {
+  // A provider that declares the per-exchange hook. The hook call is the
+  // wiring under test — these tests go red if the poll-loop seam is severed.
+  // What the provider DOES with an exchange (e.g. write markdown into
+  // conversations/) ships with the provider, not the runner.
+  class HookedMockProvider extends MockProvider {
+    readonly exchanges: ProviderExchange[] = [];
+    onExchangeComplete(exchange: ProviderExchange): void {
+      this.exchanges.push(exchange);
+    }
+  }
+
+  it('reports each exchange to a provider that declares the hook', async () => {
+    insertMessage(
+      'm1',
+      { sender: 'Alice', text: 'please archive this' },
+      { platformId: 'chan-1', channelType: 'discord' },
+    );
+
+    const provider = new HookedMockProvider({}, () => '<message to="discord-test">archived answer</message>');
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 2000);
+
+    await waitFor(() => provider.exchanges.length > 0, 2000);
+    controller.abort();
+
+    expect(provider.exchanges.length).toBe(1);
+    const exchange = provider.exchanges[0];
+    expect(exchange.prompt).toContain('please archive this');
+    expect(exchange.result).toContain('archived answer');
+    expect(exchange.continuation).toStartWith('mock-session-');
+    expect(exchange.status).toBe('completed');
+
+    await loopPromise.catch(() => {});
+  });
+
+  it('does not report the internal wrapping-retry nudge as a user prompt', async () => {
+    insertMessage('m1', { sender: 'Alice', text: 'wrap this later' }, { platformId: 'chan-1', channelType: 'discord' });
+
+    let calls = 0;
+    const provider = new HookedMockProvider({}, () => {
+      calls += 1;
+      // First result is unwrapped (triggers the retry nudge), second is wrapped.
+      return calls === 1 ? 'unwrapped text' : '<message to="discord-test">wrapped now</message>';
+    });
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 3000);
+
+    await waitFor(() => provider.exchanges.length >= 2, 3000);
+    controller.abort();
+
+    // Both exchanges attribute themselves to the real user prompt, never the nudge.
+    for (const exchange of provider.exchanges) {
+      expect(exchange.prompt).not.toContain('Your response was not delivered');
+      expect(exchange.prompt).toContain('wrap this later');
+    }
+    expect(provider.exchanges.map((e) => e.status)).toEqual(['undelivered', 'completed']);
+
+    await loopPromise.catch(() => {});
+  });
+
+  it('a throwing hook never breaks delivery', async () => {
+    insertMessage(
+      'm1',
+      { sender: 'Alice', text: 'still deliver this' },
+      { platformId: 'chan-1', channelType: 'discord' },
+    );
+
+    class ThrowingHookProvider extends MockProvider {
+      onExchangeComplete(): void {
+        throw new Error('hook exploded');
+      }
+    }
+    const provider = new ThrowingHookProvider({}, () => '<message to="discord-test">delivered anyway</message>');
+    const controller = new AbortController();
+    const loopPromise = runPollLoopWithTimeout(provider, controller.signal, 2000);
+
+    await waitFor(() => getUndeliveredMessages().length > 0, 2000);
+    controller.abort();
+
+    const out = getUndeliveredMessages();
+    expect(out.length).toBe(1);
+    expect(out[0].content).toContain('delivered anyway');
+
+    await loopPromise.catch(() => {});
+  });
+});
+
 describe('poll loop — provider error recovery', () => {
-  it('writes error to outbound and continues loop on provider throw', async () => {
+  it('writes a safe error notice to outbound and continues loop on provider throw', async () => {
     insertMessage('m1', { sender: 'Alice', text: 'trigger error' }, { platformId: 'chan-1', channelType: 'discord' });
 
     const provider = new ThrowingProvider('API rate limit exceeded');
@@ -396,8 +471,8 @@ describe('poll loop — provider error recovery', () => {
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
-    expect(JSON.parse(out[0].content).text).toContain('Error:');
-    expect(JSON.parse(out[0].content).text).toContain('API rate limit exceeded');
+    expect(JSON.parse(out[0].content).text).toBe('The agent run failed. Check the logs for details.');
+    expect(out[0].content).not.toContain('API rate limit exceeded');
 
     // Input message should be marked completed despite the error
     const pending = getPendingMessages();
@@ -422,10 +497,11 @@ describe('poll loop — stale session recovery', () => {
     await waitFor(() => getUndeliveredMessages().length > 0, 2000);
     controller.abort();
 
-    // Error was written to outbound
+    // A safe notice reaches the user; the provider diagnostic stays private.
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
-    expect(JSON.parse(out[0].content).text).toContain('Error:');
+    expect(JSON.parse(out[0].content).text).toBe('The agent run failed. Check the logs for details.');
+    expect(out[0].content).not.toContain('session not found');
 
     // Continuation was cleared (isSessionInvalid returned true)
     expect(getContinuation('mock')).toBeUndefined();
@@ -474,7 +550,6 @@ describe('poll loop — /clear command', () => {
  * Provider that throws on every query, simulating API failures.
  */
 class ThrowingProvider {
-  readonly supportsNativeSlashCommands = false;
   private errorMessage: string;
 
   constructor(errorMessage: string) {
@@ -503,8 +578,6 @@ class ThrowingProvider {
  * First emits an init event (setting continuation), then throws.
  */
 class InvalidSessionProvider {
-  readonly supportsNativeSlashCommands = false;
-
   isSessionInvalid(): boolean {
     return true;
   }
@@ -517,6 +590,98 @@ class InvalidSessionProvider {
       events: (async function* () {
         yield { type: 'init' as const, continuation: 'doomed-session' };
         throw new Error('session not found');
+      })(),
+    };
+  }
+}
+
+describe('poll loop — slash command during active query', () => {
+  // SKIPPED: hangs before the first provider query on GitHub Actions runners
+  // only — 5 of 6 CI runs failed (the poll loop never issues the query within
+  // 15s) while passing everywhere reproducible: macOS/arm64, Linux/arm64
+  // (incl. 2-core pinned, TZ=UTC, bun --frozen-lockfile), and emulated
+  // linux/amd64 — all on bun 1.3.12.
+  // TODO: reproduce with in-loop diagnostics (pending rows + ack states per
+  // tick) on a throwaway branch and fix the underlying race, then un-skip.
+  it.skip('aborts the active query when /clear arrives as a follow-up', async () => {
+    insertMessage(
+      'm-active',
+      { sender: 'Alice', text: 'long running request' },
+      { platformId: 'chan-1', channelType: 'discord' },
+    );
+
+    const provider = new BlockingProvider();
+    const controller = new AbortController();
+    // Generous budgets: on resource-starved CI runners the poll loop can take
+    // well over 2s to issue its first query, which made this test the only
+    // deterministic CI failure while passing everywhere else (macOS + Linux
+    // dev boxes run it in ~0.6s; success aborts the loop early, so the large
+    // ceilings cost nothing on the happy path).
+    const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 20000);
+
+    await waitFor(() => provider.queries === 1, 15000);
+    insertMessage(
+      'm-clear-active',
+      { sender: 'Alice', text: '/clear' },
+      { platformId: 'chan-1', channelType: 'discord' },
+    );
+
+    await waitFor(() => provider.aborts === 1, 15000);
+    await waitFor(
+      () => getUndeliveredMessages().some((msg) => JSON.parse(msg.content).text === 'Session cleared.'),
+      15000,
+    );
+    controller.abort();
+
+    expect(provider.ends).toBe(0);
+    expect(getContinuation('mock')).toBeUndefined();
+    expect(getPendingMessages()).toHaveLength(0);
+
+    await loopPromise.catch(() => {});
+  }, 30000);
+});
+
+/**
+ * Provider whose query never completes until ended/aborted — for testing how
+ * the loop interrupts an active stream.
+ */
+class BlockingProvider {
+  queries = 0;
+  aborts = 0;
+  ends = 0;
+
+  isSessionInvalid(): boolean {
+    return false;
+  }
+
+  query() {
+    const owner = this;
+    this.queries += 1;
+    let wake: (() => void) | null = null;
+    let ended = false;
+    let aborted = false;
+
+    return {
+      push() {},
+      end: () => {
+        owner.ends += 1;
+        ended = true;
+        wake?.();
+      },
+      abort: () => {
+        owner.aborts += 1;
+        aborted = true;
+        wake?.();
+      },
+      events: (async function* () {
+        yield { type: 'activity' as const };
+        yield { type: 'init' as const, continuation: 'blocking-session' };
+        while (!ended && !aborted) {
+          await new Promise<void>((resolve) => {
+            wake = resolve;
+          });
+          wake = null;
+        }
       })(),
     };
   }

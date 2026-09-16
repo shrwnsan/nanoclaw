@@ -9,10 +9,10 @@
 import fs from 'fs';
 import path from 'path';
 
-import { getCurrentBatchRouting } from '../current-batch.js';
 import { findByName, getAllDestinations } from '../destinations.js';
 import { getMessageIdBySeq, getRoutingBySeq, writeMessageOut } from '../db/messages-out.js';
-import { getSessionRouting } from '../db/session-routing.js';
+import { getCurrentInReplyTo, getCurrentReplyRoute } from '../db/session-state.js';
+import { resolveDestinationThread } from '../db/session-routing.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
 
@@ -41,91 +41,27 @@ function destinationList(): string {
 /**
  * Resolve a destination name to routing fields.
  *
- * If `to` is omitted, use the session's default reply routing (channel +
- * thread the conversation is in) — the agent replies in place.
- *
- * If `to` is specified, look up the named destination. If it resolves to
- * the same channel the session is bound to, the session's thread_id is
- * preserved so replies land in the correct thread. Otherwise thread_id
- * is null (a cross-destination send starts a new conversation).
+ * A channel destination is threaded like the poll loop's explicit deliveries:
+ * a destination-pinned thread (per-topic destinations) wins so explicit sends —
+ * including from isolated task sessions, which have no reply context — land in
+ * the pinned topic deterministically; else the thread of the message being
+ * answered (the published reply stamp) when it came from that channel, else
+ * that channel's latest inbound thread. An agent destination never carries a
+ * thread.
  */
 function resolveRouting(
-  to: string | undefined,
+  to: string,
 ): { channel_type: string; platform_id: string; thread_id: string | null; resolvedName: string } | { error: string } {
-  if (!to) {
-    // Default: reply to whatever thread/channel this session is bound to.
-    const session = getSessionRouting();
-    if (session.channel_type && session.platform_id) {
-      let thread_id = session.thread_id;
-      // Shared sessions pin no thread (session_routing.thread_id is null),
-      // and a null thread lands in the platform's default topic (Telegram
-      // "General"). Mirror sendToDestination's batch-thread priority
-      // (poll-loop.ts): when the current batch came from this channel, its
-      // thread — the topic an interactive message arrived in, or a
-      // scheduled task's target topic — is where "in place" actually is.
-      const batch = getCurrentBatchRouting();
-      if (batch && batch.channelType === session.channel_type && batch.platformId === session.platform_id) {
-        thread_id = batch.threadId;
-        if (thread_id === null && batch.kind === 'task') {
-          // Legacy task scheduled before per-task thread routing existed —
-          // the sole same-channel destination's configured thread is the
-          // intended target (same fallback as dispatch uses).
-          const sameChannel = getAllDestinations().filter(
-            (d) => d.type === 'channel' && d.channelType === session.channel_type && d.platformId === session.platform_id,
-          );
-          if (sameChannel.length === 1) thread_id = sameChannel[0].threadId ?? null;
-        }
-      }
-      // Report the destination whose configured thread we landed in, so
-      // the model can verify success — a bare "(current conversation)"
-      // reads as a misroute when the intended target was a named topic
-      // destination (observed: an agent sent a false "routed wrong"
-      // correction to the chat after a correctly-routed send).
-      let resolvedName = '(current conversation)';
-      if (thread_id) {
-        const match = getAllDestinations().find(
-          (d) => d.type === 'channel' && d.threadId === thread_id,
-        );
-        resolvedName = match ? match.name : `(current conversation, topic ${thread_id})`;
-      }
-      return {
-        channel_type: session.channel_type,
-        platform_id: session.platform_id,
-        thread_id,
-        resolvedName,
-      };
-    }
-    // No session routing (e.g., agent-shared or internal-only agent) —
-    // fall back to the legacy single-destination shortcut.
-    const all = getAllDestinations();
-    if (all.length === 0) return { error: 'No destinations configured.' };
-    if (all.length > 1) {
-      return {
-        error: `You have multiple destinations — specify "to". Options: ${all.map((d) => d.name).join(', ')}`,
-      };
-    }
-    to = all[0].name;
-  }
   const dest = findByName(to);
   if (!dest) return { error: `Unknown destination "${to}". Known: ${destinationList()}` };
   if (dest.type === 'channel') {
-    const session = getSessionRouting();
-    const isSameChannel = session.channel_type === dest.channelType && session.platform_id === dest.platformId;
-    // A configured per-topic destination always wins. For a threadless
-    // destination on the session's own channel, fall back to the batch's
-    // thread (the conversation the agent is responding in) before the
-    // session default — shared sessions pin no thread, and a null thread
-    // lands in the platform's default topic ("General").
-    const batch = getCurrentBatchRouting();
-    const batchThread =
-      batch && batch.channelType === dest.channelType && batch.platformId === dest.platformId
-        ? batch.threadId
-        : null;
-    const threadId = dest.threadId ?? (isSameChannel ? (batchThread ?? session.thread_id) : null);
     return {
       channel_type: dest.channelType!,
       platform_id: dest.platformId!,
-      thread_id: threadId,
+      thread_id:
+        dest.threadId ??
+        resolveDestinationThread(dest.channelType!, dest.platformId!, getCurrentReplyRoute())?.threadId ??
+        null,
       resolvedName: to,
     };
   }
@@ -135,30 +71,32 @@ function resolveRouting(
 export const sendMessage: McpToolDefinition = {
   tool: {
     name: 'send_message',
-    description: 'Send a message to a named destination. If you have only one destination, you can omit `to`.',
+    description: 'Send a message to a named destination.',
     inputSchema: {
       type: 'object' as const,
       properties: {
         to: {
           type: 'string',
-          description: 'Destination name (e.g., "family", "worker-1"). Optional if you have only one destination.',
+          description: 'Destination name (e.g., "family", "worker-1").',
         },
         text: { type: 'string', description: 'Message content' },
       },
-      required: ['text'],
+      required: ['to', 'text'],
     },
   },
   async handler(args) {
+    const to = args.to as string;
     const text = args.text as string;
+    if (!to) return err(`to is required. Options: ${destinationList()}`);
     if (!text) return err('text is required');
 
-    const routing = resolveRouting(args.to as string | undefined);
+    const routing = resolveRouting(to);
     if ('error' in routing) return err(routing.error);
 
     const id = generateId();
-    const seq = writeMessageOut({
+    const seq = await writeMessageOut({
       id,
-      in_reply_to: getCurrentBatchRouting()?.inReplyTo ?? null,
+      in_reply_to: getCurrentInReplyTo(),
       kind: 'chat',
       platform_id: routing.platform_id,
       channel_type: routing.channel_type,
@@ -167,30 +105,36 @@ export const sendMessage: McpToolDefinition = {
     });
 
     log(`send_message: #${seq} → ${routing.resolvedName}`);
-    return ok(`Message sent to ${routing.resolvedName} (id: ${seq})`);
+    // Fork (#41): name the resolved thread so the model can verify routing —
+    // a bare confirmation reads as a misroute when the send landed in a
+    // dynamic or pinned topic the agent couldn't see.
+    const threadNote = routing.thread_id ? `, thread ${routing.thread_id}` : '';
+    return ok(`Message sent to ${routing.resolvedName}${threadNote} (id: ${seq})`);
   },
 };
 
 export const sendFile: McpToolDefinition = {
   tool: {
     name: 'send_file',
-    description: 'Send a file to a named destination. If you have only one destination, you can omit `to`.',
+    description: 'Send a file to a named destination.',
     inputSchema: {
       type: 'object' as const,
       properties: {
-        to: { type: 'string', description: 'Destination name. Optional if you have only one destination.' },
+        to: { type: 'string', description: 'Destination name.' },
         path: { type: 'string', description: 'File path (relative to /workspace/agent/ or absolute)' },
         text: { type: 'string', description: 'Optional accompanying message' },
         filename: { type: 'string', description: 'Display name (default: basename of path)' },
       },
-      required: ['path'],
+      required: ['to', 'path'],
     },
   },
   async handler(args) {
+    const to = args.to as string;
     const filePath = args.path as string;
+    if (!to) return err(`to is required. Options: ${destinationList()}`);
     if (!filePath) return err('path is required');
 
-    const routing = resolveRouting(args.to as string | undefined);
+    const routing = resolveRouting(to);
     if ('error' in routing) return err(routing.error);
 
     const resolvedPath = path.isAbsolute(filePath) ? filePath : path.resolve('/workspace/agent', filePath);
@@ -203,9 +147,9 @@ export const sendFile: McpToolDefinition = {
     fs.mkdirSync(outboxDir, { recursive: true });
     fs.copyFileSync(resolvedPath, path.join(outboxDir, filename));
 
-    writeMessageOut({
+    await writeMessageOut({
       id,
-      in_reply_to: getCurrentBatchRouting()?.inReplyTo ?? null,
+      in_reply_to: getCurrentInReplyTo(),
       kind: 'chat',
       platform_id: routing.platform_id,
       channel_type: routing.channel_type,
@@ -214,7 +158,8 @@ export const sendFile: McpToolDefinition = {
     });
 
     log(`send_file: ${id} → ${routing.resolvedName} (${filename})`);
-    return ok(`File sent to ${routing.resolvedName} (id: ${id}, filename: ${filename})`);
+    const fileThreadNote = routing.thread_id ? `, thread ${routing.thread_id}` : '';
+    return ok(`File sent to ${routing.resolvedName}${fileThreadNote} (id: ${id}, filename: ${filename})`);
   },
 };
 
@@ -245,7 +190,7 @@ export const editMessage: McpToolDefinition = {
     }
 
     const id = generateId();
-    writeMessageOut({
+    await writeMessageOut({
       id,
       kind: 'chat',
       platform_id: routing.platform_id,
@@ -286,7 +231,7 @@ export const addReaction: McpToolDefinition = {
     }
 
     const id = generateId();
-    writeMessageOut({
+    await writeMessageOut({
       id,
       kind: 'chat',
       platform_id: routing.platform_id,
