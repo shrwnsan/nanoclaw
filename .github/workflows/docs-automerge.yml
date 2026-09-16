@@ -36,20 +36,11 @@ jobs:
             exit 1
           fi
 
-      - name: Wait for the PR to be mergeable
+      - name: Merge (immediately, or arm GitHub auto-merge)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR: ${{ github.event.pull_request.number }}
-        run: |
-          state=unknown
-          for i in $(seq 1 12); do
-            state=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq '.mergeable_state')
-            [ "$state" = "clean" ] && exit 0
-            sleep 10
-          done
-          echo "::error::PR never reached mergeable (state: $state)"
-          exit 1
-
+        run: gh pr merge "$PR" --repo "$GITHUB_REPOSITORY" --merge --auto
       - name: Merge
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
