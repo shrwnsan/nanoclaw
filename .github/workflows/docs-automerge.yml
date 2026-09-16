@@ -1,0 +1,57 @@
+name: Docs automerge
+
+# Fork-only convenience: auto-merge the operator's own docs-only PRs.
+# Gated on the PR author (never fires for strangers — the automatic
+# `kind/documentation` label from label-pr.yml is not sufficient on its own,
+# since anyone on a public fork can check that box in the PR template).
+
+on:
+  pull_request:
+    types: [labeled, synchronize, reopened]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  automerge:
+    if: >-
+      github.repository == 'shrwnsan/nanoclaw' &&
+      github.event.pull_request.user.login == 'shrwnsan' &&
+      github.event.pull_request.base.ref == 'dev' &&
+      github.event.pull_request.draft == false &&
+      contains(github.event.pull_request.labels.*.name, 'kind/documentation')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require docs-only changes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          files=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/files" --paginate --jq '.[].filename')
+          echo "$files"
+          bad=$(echo "$files" | grep -vE '^(docs/[^/]+\.(md|txt)|[^/]+\.(md|txt))$' || true)
+          if [ -n "$bad" ]; then
+            echo "::error::Not docs-only — these paths disqualify the PR: $bad"
+            exit 1
+          fi
+
+      - name: Wait for the PR to be mergeable
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          state=unknown
+          for i in $(seq 1 12); do
+            state=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq '.mergeable_state')
+            [ "$state" = "clean" ] && exit 0
+            sleep 10
+          done
+          echo "::error::PR never reached mergeable (state: $state)"
+          exit 1
+
+      - name: Merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+        run: gh pr merge "$PR" --repo "$GITHUB_REPOSITORY" --merge

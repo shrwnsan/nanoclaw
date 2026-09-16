@@ -38,6 +38,7 @@ permissions:
 
 jobs:
   approve:
+    if: github.repository == 'nanocoai/nanoclaw'
     runs-on: ubuntu-latest
     # Off unless deliberately enabled. Without this it reports what it would
     # have done and stops, so the whole path can be watched before it is armed.

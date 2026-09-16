@@ -28,6 +28,7 @@ concurrency:
 
 jobs:
   dispatch:
+    if: github.repository == 'nanocoai/nanoclaw'
     runs-on: ubuntu-latest
     permissions: {}
     steps:
@@ -47,6 +48,7 @@ jobs:
           fi
 
   verify:
+    if: github.repository == 'nanocoai/nanoclaw'
     needs: dispatch
     runs-on: ubuntu-latest
     permissions:
@@ -172,7 +174,7 @@ jobs:
         run: bun run test
 
   publish:
-    if: inputs.mode == 'publish'
+    if: github.repository == 'nanocoai/nanoclaw' && (inputs.mode == 'publish')
     needs: verify
     runs-on: ubuntu-latest
     # This environment must be created and protected before the workflow lands.

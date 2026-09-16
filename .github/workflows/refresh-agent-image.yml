@@ -27,6 +27,7 @@ permissions:
 
 jobs:
   open-bump-pr:
+    if: github.repository == 'nanocoai/nanoclaw'
     runs-on: ubuntu-latest
     permissions:
       contents: write # create the bump branch
