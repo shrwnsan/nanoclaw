@@ -38,7 +38,7 @@ Run `ncl tasks list`. New task rows should show a system `session_id`, not the c
 
 Tasks created through the old MCP tools live in the **chat session** that created them, not in a per-series system session. They are unaffected by this update: they keep firing and delivering exactly as before. Two things to know:
 
-- An agent's own `ncl tasks list` (group scope) shows only its group's task rows; from the **host**, unscoped `ncl tasks list` enumerates everything, and `--session <id>` narrows to one session — that is how you find and manage legacy rows (`ncl tasks cancel --session <chat_session_id> --all` to clear a chat session's tasks).
+- Group-scoped task lookups (an agent's own `ncl tasks` commands, and host `ncl tasks list --group <id>`) scan **every session of the group**, so legacy rows in chat mailboxes are listed and manageable like any other task. On checkouts older than the group-session scan, these lookups saw only per-series task sessions — legacy rows stayed invisible from inside the container, and the host-side escape hatches were unscoped `ncl tasks list` and `--session <id>` (`ncl tasks cancel --session <chat_session_id> --all` to clear a chat session's tasks).
 - The `messages_in` status enum now includes `cancelled` (cancel marks the row and clears its recurrence rather than deleting it). Custom code that exhaustively switches on task status needs the new arm.
 
 ## Rollback
