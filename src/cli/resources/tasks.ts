@@ -5,7 +5,7 @@ import { resolveGroupTimezone } from '../../container-config.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
 import {
   deleteSession,
-  findTaskSessions,
+  findGroupSessions,
   getActiveSessions,
   getSession,
   isTaskThread,
@@ -91,8 +91,11 @@ async function selectedSessions(
 
   const group = groupArg(args, ctx);
   if (group) {
-    // One session per live task series — the loops below already fan out across them.
-    return (await findTaskSessions(group, includeClosed)).map((s) => ({
+    // Scan every session of the group: task rows also live in chat mailboxes
+    // on installs that predate per-series task sessions. The loops below fan
+    // out across these, and withExistingMailboxSession skips folders that
+    // don't exist, so brand-new groups with no task history stay cheap.
+    return (await findGroupSessions(group, includeClosed)).map((s) => ({
       id: s.id,
       agent_group_id: s.agent_group_id,
     }));

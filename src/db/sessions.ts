@@ -115,6 +115,23 @@ export async function findTaskSessions(agentGroupId: string, includeClosed = fal
   );
 }
 
+/**
+ * Every session of a group — active by default, optionally including closed
+ * history. Task rows are legitimate in any group mailbox: installs that
+ * predate per-series task sessions keep them in the main chat session, so
+ * scoped task lookups must scan all of the group's sessions, not only the
+ * `system:tasks:*` ones.
+ */
+export async function findGroupSessions(agentGroupId: string, includeClosed = false): Promise<Session[]> {
+  return getDb().all<Session>(
+    `SELECT * FROM sessions
+      WHERE agent_group_id = ?
+        ${includeClosed ? '' : "AND status = 'active'"}
+       ORDER BY created_at DESC`,
+    agentGroupId,
+  );
+}
+
 export async function getActiveSessions(): Promise<Session[]> {
   return getDb().all<Session>("SELECT * FROM sessions WHERE status = 'active'");
 }
