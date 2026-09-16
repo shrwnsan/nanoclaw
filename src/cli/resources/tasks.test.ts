@@ -510,6 +510,40 @@ describe('tasks CLI resource', () => {
     expect(row?.log).toBe(`tasks/${series_id}.md`);
   });
 
+  it('agent-scoped list/get see legacy tasks living in a chat session mailbox', async () => {
+    // Pre-per-series-session installs kept task rows in the group's main chat
+    // mailbox (thread_id null), not in `system:tasks:*` sessions. Task lookups
+    // scoped to the group must scan every group session, or those installs
+    // report "No tasks." from inside the container even though schedules fire.
+    const legacyId = 'task-legacy-briefing';
+    const db = new Database(inboundDbPath('ag-1', 'chat-1'));
+    db.prepare(
+      'INSERT INTO messages_in (id, seq, timestamp, status, tries, kind, content, series_id, process_after, recurrence) ' +
+        "VALUES (?, ?, datetime('now'), 'pending', 0, 'task', ?, ?, ?, ?)",
+    ).run(
+      'legacy-live-1',
+      10,
+      JSON.stringify({ prompt: 'legacy daily briefing' }),
+      legacyId,
+      '2026-09-17T09:00:00.000Z',
+      '0 9 * * *',
+    );
+    db.close();
+
+    const list = await dispatch({ id: 'lg-l', command: 'tasks-list', args: {} }, agentCtx('ag-1', 'chat-1'));
+    expect(list.ok).toBe(true);
+    if (!list.ok) return;
+    const ids = (list.data as Array<{ series_id: string }>).map((t) => t.series_id);
+    expect(ids).toContain(legacyId);
+
+    const got = await dispatch(
+      { id: 'lg-g', command: 'tasks-get', args: { id: legacyId } },
+      agentCtx('ag-1', 'chat-1'),
+    );
+    expect(got.ok).toBe(true);
+    if (got.ok) expect((got.data as { series_id: string }).series_id).toBe(legacyId);
+  });
+
   // The schedule→wake primitive without a container: a task created through the
   // real `ncl tasks create` path must land in the agent group's system session
   // AND be counted by the same due-message query the host sweep uses to decide a
