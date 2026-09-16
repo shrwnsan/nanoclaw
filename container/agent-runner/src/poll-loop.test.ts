@@ -1,11 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
-import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './db/connection.js';
+import { initTestSessionDb, closeSessionDb, getInboundDb, getOutboundDb } from './mailbox/sqlite/connection.js';
 import { getPendingMessages, markCompleted } from './db/messages-in.js';
 import { getUndeliveredMessages } from './db/messages-out.js';
 import { formatMessages, extractRouting } from './formatter.js';
-import { dispatchResultText } from './poll-loop.js';
+import { processQuery } from './poll-loop.js';
 import { MockProvider } from './providers/mock.js';
+import type { AgentQuery, ProviderEvent, ProviderExchange } from './providers/types.js';
 
 beforeEach(() => {
   initTestSessionDb();
@@ -38,13 +39,15 @@ describe('formatter', () => {
     expect(prompt).toContain('Hello world');
   });
 
-  it('should format multiple chat messages as XML block', () => {
+  it('should format multiple chat messages as distinct <message> blocks', () => {
     insertMessage('m1', 'chat', { sender: 'John', text: 'Hello' });
     insertMessage('m2', 'chat', { sender: 'Jane', text: 'Hi there' });
     const messages = getPendingMessages();
     const prompt = formatMessages(messages);
-    expect(prompt).toContain('<messages>');
-    expect(prompt).toContain('</messages>');
+    // The <messages> envelope was dropped in fe2e881b (#2556) so the SDK calls
+    // the API; each message is now its own self-contained <message> block.
+    expect(prompt).not.toContain('<messages>');
+    expect(prompt.match(/<message /g) ?? []).toHaveLength(2);
     expect(prompt).toContain('sender="John"');
     expect(prompt).toContain('sender="Jane"');
   });
@@ -217,7 +220,13 @@ describe('origin metadata (from= attribute)', () => {
       .run(name, name, channelType, platformId);
   }
 
-  function insertWithRouting(id: string, kind: string, content: object, channelType: string | null, platformId: string | null): void {
+  function insertWithRouting(
+    id: string,
+    kind: string,
+    content: object,
+    channelType: string | null,
+    platformId: string | null,
+  ): void {
     getInboundDb()
       .prepare(
         `INSERT INTO messages_in (id, kind, timestamp, status, platform_id, channel_type, content)
@@ -293,10 +302,12 @@ describe('mock provider', () => {
     }
 
     const typed = events.filter((e) => e.type !== 'activity');
-    expect(typed.length).toBeGreaterThanOrEqual(2);
+    expect(typed.length).toBeGreaterThanOrEqual(3);
     expect(typed[0].type).toBe('init');
-    expect(typed[1].type).toBe('result');
-    expect((typed[1] as { text: string }).text).toBe('Echo: Hello');
+    // The mock streams text before the result repeats it.
+    expect(typed[1].type).toBe('text');
+    expect(typed[2].type).toBe('result');
+    expect((typed[2] as { text: string }).text).toBe('Echo: Hello');
   });
 
   it('should handle push() during active query', async () => {
@@ -351,7 +362,7 @@ describe('end-to-end with mock provider', () => {
 
     for await (const event of query.events) {
       if (event.type === 'result' && event.text) {
-        writeMessageOut({
+        await writeMessageOut({
           id: `out-${Date.now()}`,
           in_reply_to: routing.inReplyTo,
           kind: 'chat',
@@ -377,212 +388,247 @@ describe('end-to-end with mock provider', () => {
   });
 });
 
-describe('destination thread routing (scheduled tasks vs chat)', () => {
-  const PLATFORM = 'telegram:-100999000111';
-  const ALERTS_THREAD = `${PLATFORM}:51`;
-  const CHAT_THREAD = `${PLATFORM}:179`;
+/**
+ * Build a one-shot stub query that yields init + a single result event, then
+ * ends. `pushes` records any follow-ups the loop tried to inject (e.g. the
+ * re-wrap nudge), so a test can assert the loop did NOT re-hammer.
+ */
+function makeResultQuery(result: ProviderEvent): { query: AgentQuery; pushes: string[] } {
+  const pushes: string[] = [];
+  async function* events(): AsyncGenerator<ProviderEvent> {
+    yield { type: 'init', continuation: 'sess-1' };
+    yield result;
+  }
+  return {
+    pushes,
+    query: {
+      push: (m: string) => {
+        pushes.push(m);
+      },
+      end: () => {},
+      events: events(),
+      abort: () => {},
+    },
+  };
+}
 
-  function seedAlertsDestination(): void {
-    getInboundDb()
-      .prepare(
-        `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id, thread_id)
-         VALUES ('alerts', 'alerts', 'channel', 'telegram', ?, NULL, ?)`,
-      )
-      .run(PLATFORM, ALERTS_THREAD);
+const ERR_ROUTING = {
+  platformId: 'chan-1',
+  channelType: 'discord',
+  threadId: null,
+  inReplyTo: 'm1',
+};
+
+it('does not push accumulated-only follow-ups into an active query', async () => {
+  const pushes: string[] = [];
+
+  async function* events(): AsyncGenerator<ProviderEvent> {
+    yield { type: 'init', continuation: 'sess-1' };
+    insertMessage('m1', 'chat', { sender: 'A', text: 'context only' }, { trigger: 0 });
+    await new Promise((resolve) => setTimeout(resolve, 750));
   }
 
-  function insertRoutedMessage(
-    id: string,
-    kind: string,
-    seq: number,
-    threadId: string | null,
-    status: 'pending' | 'completed',
-  ): void {
-    getInboundDb()
-      .prepare(
-        `INSERT INTO messages_in (id, seq, kind, timestamp, status, platform_id, channel_type, thread_id, content)
-         VALUES (?, ?, ?, datetime('now'), ?, ?, 'telegram', ?, ?)`,
-      )
-      .run(id, seq, kind, status, PLATFORM, threadId, JSON.stringify({ text: 'x' }));
-  }
+  await processQuery(
+    {
+      push: (message) => pushes.push(message),
+      end: () => {},
+      events: events(),
+      abort: () => {},
+    },
+    ERR_ROUTING,
+    [],
+    'claude',
+    undefined,
+    'prompt',
+    undefined,
+  );
 
-  it('routes task output to the task row thread even when newer chat outranks it by seq', () => {
-    seedAlertsDestination();
-    // Task row: written a day earlier (lower seq), carries its target topic.
-    insertRoutedMessage('task-1', 'task', 10, ALERTS_THREAD, 'pending');
-    // Chat in another topic arrived after the task row was written.
-    insertRoutedMessage('chat-1', 'chat-sdk', 12, CHAT_THREAD, 'completed');
+  expect(pushes).toHaveLength(0);
+  expect(getPendingMessages().map((m) => m.id)).toEqual(['m1']);
+});
 
-    const routing = extractRouting(getPendingMessages());
-    dispatchResultText('<message to="alerts">Weather briefing</message>', routing);
+describe('error result with no <message> envelope', () => {
+  it('delivers a safe failure notice to the triggering channel and does not nudge', async () => {
+    const budgetText = 'Spending limit reached. Add your own key at https://example.com/keys';
+    const { query, pushes } = makeResultQuery({ type: 'result', text: budgetText, isError: true });
 
-    const out = getUndeliveredMessages();
-    expect(out).toHaveLength(1);
-    expect(out[0].thread_id).toBe(ALERTS_THREAD);
-    expect(out[0].in_reply_to).toBe('task-1');
-  });
-
-  it('task row wins routing when a newer chat message lands in the same pending batch', () => {
-    seedAlertsDestination();
-    // Wake collision: due task + fresh chat both pending, chat has higher seq.
-    insertRoutedMessage('task-1', 'task', 10, ALERTS_THREAD, 'pending');
-    insertRoutedMessage('chat-1', 'chat-sdk', 12, CHAT_THREAD, 'pending');
-
-    const routing = extractRouting(getPendingMessages());
-    expect(routing.kind).toBe('task');
-    expect(routing.threadId).toBe(ALERTS_THREAD);
-    dispatchResultText('<message to="alerts">Digest</message>', routing);
+    await processQuery(query, ERR_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
 
     const out = getUndeliveredMessages();
     expect(out).toHaveLength(1);
-    expect(out[0].thread_id).toBe(ALERTS_THREAD);
+    expect(JSON.parse(out[0].content).text).toBe('The agent run failed. Check the logs for details.');
+    expect(out[0].platform_id).toBe('chan-1');
+    expect(out[0].channel_type).toBe('discord');
+    // No re-wrap nudge — an error result must not re-hammer the gateway.
+    expect(pushes).toHaveLength(0);
   });
 
-  it('routes interactive replies to the conversation topic, not the destination default', () => {
-    seedAlertsDestination();
-    insertRoutedMessage('chat-1', 'chat-sdk', 10, CHAT_THREAD, 'pending');
-
-    const routing = extractRouting(getPendingMessages());
-    dispatchResultText('<message to="alerts">Reply here</message>', routing);
-
-    const out = getUndeliveredMessages();
-    expect(out).toHaveLength(1);
-    expect(out[0].thread_id).toBe(CHAT_THREAD);
+  it.each([
+    '<internal>PRIVATE THOUGHTS</internal>\n\nOpenCode prompt failed: {"responseHeaders":{"authorization":"fixture-secret"}}',
+    'Unwrapped private reasoning\n\n{"responseBody":"fixture-secret"}',
+    '',
+  ])('keeps failed-turn scratchpad and diagnostics out of chat: %s', async (text) => {
+    const { query, pushes } = makeResultQuery({ type: 'result', text, isError: true });
+    const exchanges: ProviderExchange[] = [];
+    await processQuery(query, ERR_ROUTING, ['m1'], 'mock', (exchange) => exchanges.push(exchange), 'prompt', undefined);
+    expect(getUndeliveredMessages().map((row) => JSON.parse(row.content).text)).toEqual([
+      'The agent run failed. Check the logs for details.',
+    ]);
+    expect(exchanges).toHaveLength(1);
+    expect(exchanges[0].status).toBe('error');
+    expect(exchanges[0].result).toBe(text);
+    expect(pushes).toHaveLength(0);
   });
 
-  it('keeps null thread (platform default topic) for replies from the default topic', () => {
-    seedAlertsDestination();
-    insertRoutedMessage('chat-1', 'chat-sdk', 10, null, 'pending');
+  it('still nudges (and does not deliver) a normal unwrapped result', async () => {
+    const { query, pushes } = makeResultQuery({ type: 'result', text: 'bare text, no envelope' });
 
-    const routing = extractRouting(getPendingMessages());
-    dispatchResultText('<message to="alerts">General reply</message>', routing);
+    await processQuery(query, ERR_ROUTING, ['m1'], 'claude', undefined, 'prompt', undefined);
 
-    const out = getUndeliveredMessages();
-    expect(out).toHaveLength(1);
-    expect(out[0].thread_id).toBeNull();
-  });
-
-  it('falls back to the destination thread for legacy tasks scheduled without a thread', () => {
-    seedAlertsDestination();
-    insertRoutedMessage('task-1', 'task', 10, null, 'pending');
-
-    const routing = extractRouting(getPendingMessages());
-    dispatchResultText('<message to="alerts">Briefing</message>', routing);
-
-    const out = getUndeliveredMessages();
-    expect(out).toHaveLength(1);
-    expect(out[0].thread_id).toBe(ALERTS_THREAD);
-  });
-
-  it('cross-destination send to a channel with no inbound history uses the destination thread', () => {
-    seedAlertsDestination();
-    getInboundDb()
-      .prepare(
-        `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id, thread_id)
-         VALUES ('squad', 'squad', 'channel', 'telegram', 'telegram:-100999', NULL, 'telegram:-100999:7')`,
-      )
-      .run();
-    // Batch comes from the alerts channel, not the squad channel.
-    insertRoutedMessage('task-1', 'task', 10, ALERTS_THREAD, 'pending');
-
-    const routing = extractRouting(getPendingMessages());
-    dispatchResultText('<message to="squad">Cross-post</message>', routing);
-
-    const out = getUndeliveredMessages();
-    expect(out).toHaveLength(1);
-    expect(out[0].platform_id).toBe('telegram:-100999');
-    expect(out[0].thread_id).toBe('telegram:-100999:7');
-  });
-
-  it('cross-destination send to a channel with inbound history uses the latest inbound thread', () => {
-    seedAlertsDestination();
-    getInboundDb()
-      .prepare(
-        `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id, thread_id)
-         VALUES ('squad', 'squad', 'channel', 'telegram', 'telegram:-100999', NULL, 'telegram:-100999:7')`,
-      )
-      .run();
-    insertRoutedMessage('task-1', 'task', 10, ALERTS_THREAD, 'pending');
-    // The squad channel has its own recent inbound traffic in topic :9.
-    getInboundDb()
-      .prepare(
-        `INSERT INTO messages_in (id, seq, kind, timestamp, status, platform_id, channel_type, thread_id, content)
-         VALUES ('squad-chat', 14, 'chat-sdk', datetime('now'), 'completed', 'telegram:-100999', 'telegram', 'telegram:-100999:9', ?)`,
-      )
-      .run(JSON.stringify({ text: 'x' }));
-
-    const routing = extractRouting(getPendingMessages());
-    dispatchResultText('<message to="squad">Cross-post</message>', routing);
-
-    const out = getUndeliveredMessages();
-    expect(out).toHaveLength(1);
-    expect(out[0].thread_id).toBe('telegram:-100999:9');
-  });
-
-  it('same-channel topic-bound destination is routed by the conversation, not its configured thread', () => {
-    // Documents the deliberate limitation: <message> blocks route by the
-    // conversation's topic (batch thread); a topic-bound destination on the
-    // same channel cannot be targeted via <message> — use send_message,
-    // which prefers dest.threadId.
-    seedAlertsDestination();
-    getInboundDb()
-      .prepare(
-        `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id, thread_id)
-         VALUES ('alerts-topic', 'alerts-topic', 'channel', 'telegram', ?, NULL, ?)`,
-      )
-      .run(PLATFORM, `${PLATFORM}:23`);
-    insertRoutedMessage('chat-1', 'chat-sdk', 10, CHAT_THREAD, 'pending');
-
-    const routing = extractRouting(getPendingMessages());
-    dispatchResultText(
-      `<message to="alerts">Reply</message><message to="alerts-topic">Cross-topic</message>`,
-      routing,
-    );
-
-    const out = getUndeliveredMessages();
-    expect(out).toHaveLength(2);
-    expect(out[0].thread_id).toBe(CHAT_THREAD);
-    expect(out[1].thread_id).toBe(CHAT_THREAD);
-  });
-
-  it('bare-text fallback sends to the single destination with the batch thread', () => {
-    seedAlertsDestination();
-    insertRoutedMessage('chat-1', 'chat-sdk', 10, CHAT_THREAD, 'pending');
-
-    const routing = extractRouting(getPendingMessages());
-    dispatchResultText('No wrapping, just text', routing);
-
-    const out = getUndeliveredMessages();
-    expect(out).toHaveLength(1);
-    expect(out[0].thread_id).toBe(CHAT_THREAD);
-    expect(JSON.parse(out[0].content).text).toBe('No wrapping, just text');
-  });
-
-  it('bare-text fallback strips <internal> notes before sending', () => {
-    seedAlertsDestination();
-    insertRoutedMessage('chat-1', 'chat-sdk', 10, CHAT_THREAD, 'pending');
-
-    const routing = extractRouting(getPendingMessages());
-    const result = dispatchResultText(
-      '<internal>scratch note about a failed send</internal>Here is the actual update',
-      routing,
-    );
-
-    const out = getUndeliveredMessages();
-    expect(result.hasUnwrapped).toBe(false);
-    expect(out).toHaveLength(1);
-    expect(JSON.parse(out[0].content).text).toBe('Here is the actual update');
-  });
-
-  it('bare-text fallback sends nothing when output is all <internal>, and reports unwrapped for the nudge', () => {
-    seedAlertsDestination();
-    insertRoutedMessage('chat-1', 'chat-sdk', 10, CHAT_THREAD, 'pending');
-
-    const routing = extractRouting(getPendingMessages());
-    const result = dispatchResultText('<internal>Failed again — to parameter not included</internal>', routing);
-
-    expect(result.sent).toBe(0);
-    expect(result.hasUnwrapped).toBe(true);
     expect(getUndeliveredMessages()).toHaveLength(0);
+    expect(pushes).toHaveLength(1);
+    expect(pushes[0]).toContain('was not delivered');
   });
+});
+
+it('delivers completed wrapped text while recording the failed turn exactly once', async () => {
+  getInboundDb()
+    .prepare(
+      `INSERT INTO destinations (name, display_name, type, channel_type, platform_id, agent_group_id)
+     VALUES ('main', 'main', 'channel', 'discord', 'chan-1', NULL)`,
+    )
+    .run();
+  const text = '<message to="main">Completed before failure.</message>\n\nBackend failed.';
+  const { query, pushes } = makeResultQuery({ type: 'result', text, isError: true });
+  const exchanges: ProviderExchange[] = [];
+
+  await processQuery(query, ERR_ROUTING, ['m1'], 'mock', (exchange) => exchanges.push(exchange), 'prompt', undefined);
+
+  expect(getUndeliveredMessages().map((row) => JSON.parse(row.content).text)).toEqual([
+    'Completed before failure.',
+    'The agent run failed. Check the logs for details.',
+  ]);
+  expect(exchanges).toEqual([{ prompt: 'prompt', result: text, continuation: 'sess-1', status: 'error' }]);
+  expect(pushes).toHaveLength(0);
+});
+
+// --- Task-run turn wiring: the REAL processQuery path (one-door) ---
+// These drive the actual call sites (autoAppendTaskLog at result-handling,
+// shouldNudgeTaskBlocks gating, and follow-up turn reset). Deleting the wiring
+// — not just the helpers — goes red here.
+
+const TASK_ROUTING = {
+  platformId: null,
+  channelType: null,
+  threadId: 'system:tasks:ser-1',
+  inReplyTo: 't1',
+  taskRun: true,
+};
+
+function taskLogRows(): Array<{ text: string }> {
+  return (
+    getOutboundDb().prepare("SELECT content FROM messages_out WHERE kind = 'task_log' ORDER BY seq").all() as Array<{
+      content: string;
+    }>
+  ).map((r) => JSON.parse(r.content) as { text: string });
+}
+
+describe('task-run turn wiring (real processQuery)', () => {
+  it('logs a failed task with inert message blocks once and does not retry delivery', async () => {
+    const text = '<message to="main">Completed before failure.</message>\n\nBackend failed.';
+    const { query, pushes } = makeResultQuery({ type: 'result', text, isError: true });
+    const exchanges: ProviderExchange[] = [];
+
+    await processQuery(
+      query,
+      TASK_ROUTING,
+      ['t1'],
+      'mock',
+      (exchange) => exchanges.push(exchange),
+      'prompt',
+      undefined,
+    );
+
+    expect(taskLogRows()).toEqual([{ text: '[undelivered → main] Completed before failure. Backend failed.' }]);
+    expect(getUndeliveredMessages().filter((row) => row.kind === 'chat')).toHaveLength(0);
+    expect(exchanges).toEqual([{ prompt: 'prompt', result: text, continuation: 'sess-1', status: 'error' }]);
+    expect(pushes).toHaveLength(0);
+  });
+
+  it('auto-appends the final text as a task_log row', async () => {
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 's1' };
+      yield { type: 'result', text: 'checked feeds — nothing new' };
+    }
+    const query: AgentQuery = { push: () => {}, end: () => {}, events: events(), abort: () => {} };
+
+    await processQuery(query, TASK_ROUTING, ['t1'], 'claude', undefined, 'prompt', undefined);
+
+    const logs = taskLogRows();
+    expect(logs).toHaveLength(1);
+    expect(logs[0].text).toBe('checked feeds — nothing new');
+    // and nothing was delivered as chat
+    expect(getUndeliveredMessages().filter((m) => m.kind === 'chat')).toHaveLength(0);
+  });
+
+  it('logs and conditionally nudges a second task run in the same open query', async () => {
+    const pushes: string[] = [];
+
+    async function* events(): AsyncGenerator<ProviderEvent> {
+      yield { type: 'init', continuation: 's1' };
+      // Turn 1 uses the legacy wrong door and consumes its one correction.
+      yield { type: 'result', text: '<message to="local-cli">fire one result</message>' };
+      yield { type: 'result', text: 'first delivery decision handled' };
+
+      // A SECOND task run lands while the query is open — the follow-up poller
+      // pushes it and must reset the per-turn correction state.
+      insertMessage('t2', 'task', { prompt: 'fire two' });
+      // The poller ticks every ACTIVE_POLL_INTERVAL_MS (500ms), so this
+      // normally resolves in well under a second. The generous deadline is
+      // for slow shared CI runners — and it must stay well below the test's
+      // own timeout (set below), so exhaustion fails on the diagnostic throw
+      // rather than a mute test timeout.
+      const deadline = Date.now() + 15_000;
+      while (!pushes.some((p) => p.includes('fire two')) && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      if (!pushes.some((p) => p.includes('fire two'))) {
+        throw new Error(
+          `follow-up poller never pushed the second task run within 15s; ` +
+            `pushes seen (${pushes.length}): ${JSON.stringify(pushes.map((p) => p.slice(0, 80)))}`,
+        );
+      }
+
+      // Turn 2 repeats the mistake. This receives a second independent nudge
+      // only if the follow-up path reset taskBlockNudged.
+      yield { type: 'result', text: '<message to="local-cli">fire two result</message>' };
+      yield { type: 'result', text: 'second delivery decision handled' };
+    }
+
+    const query: AgentQuery = {
+      push: (m: string) => {
+        pushes.push(m);
+      },
+      end: () => {},
+      events: events(),
+      abort: () => {},
+    };
+
+    await processQuery(query, TASK_ROUTING, ['t1'], 'claude', undefined, 'prompt', undefined);
+
+    const nudges = pushes.filter((p) => p.includes('If and only if'));
+    expect(nudges).toHaveLength(2);
+    expect(nudges[0]).toContain('fire one result');
+    expect(nudges[1]).toContain('fire two result');
+
+    const logs = taskLogRows().map((l) => l.text);
+    expect(logs).toHaveLength(2);
+    expect(logs[0]).toContain('[undelivered → local-cli] fire one result');
+    expect(logs[1]).toContain('[undelivered → local-cli] fire two result');
+    expect(logs).not.toContain('first delivery decision handled');
+    expect(logs).not.toContain('second delivery decision handled');
+    // Explicit budget: the default 5s equalled the old inner deadline, so on
+    // slow runners the test died as a mute timeout instead of reaching the
+    // diagnostic throw above (observed consistently on CI-hosted runners).
+  }, 20_000);
 });

@@ -1,192 +1,107 @@
 # Telegram Forum Topic Routing
 
+> Updated for the v2.3.0 upgrade (2026-09-15). The pre-seam design (batch-thread
+> priority, current-batch sidecar, `RoutingContext.kind`) is history — upstream
+> independently rebuilt most of that machinery on the agent-mailbox seam. This
+> doc describes what actually ships here now. Full upgrade analysis lives in
+> the operator's private recon guide.
+
 ## Overview
 
-NanoClaw's router collapses `thread_id` to `null` for all adapters with `supportsThreads: false` (Telegram, WhatsApp, iMessage, email). This was correct for platforms without threading, but Telegram **does** support threads via forum topics. The result: replies always land in General/root regardless of which topic the message came from.
+Telegram forum topics are real threads (`message_thread_id`). Upstream's router
+collapses `thread_id` to `null` for adapters with `supportsThreads: false`
+(Telegram declares false), which sends every reply to General. Upstream issue:
+[nanocoai/nanoclaw#1699](https://github.com/nanocoai/nanoclaw/issues/1699).
 
-Upstream issue: [nanocoai/nanoclaw#1699](https://github.com/nanocoai/nanoclaw/issues/1699)
+Our install keeps **shared sessions** (one container per group, shared context
+across all topics) and delivers by topic. The fork divergence is deliberately
+narrow: upstream's session/thread machinery is used as-is wherever possible.
 
-## Shared-Session Approach
+Upstream context: `supportsThreads: true` is a trap for us — at fanout it
+forces `effectiveSessionMode = 'per-thread'` (`src/router.ts`), i.e. per-topic
+session isolation, a different product. Do not flip it.
 
-Our approach preserves **shared sessions** (one container per group, shared context across all topics) while routing replies to the correct topic. This is a middle ground between:
+## What upstream v2.3 does natively (we port nothing)
 
-- **Current upstream**: collapse `thread_id` → all replies go to General
-- **Full per-topic isolation** (`supportsThreads: true`): each topic gets its own container, isolated conversation history — overkill for a family group chat
+- **Batch-first reply routing** — `extractRouting` reads the current batch's
+  own thread; `publishReplyRoute`/`adoptTurn` keep a per-turn reply stamp;
+  `resolveDestinationThread` prefers the reply context, falls back to the
+  channel's latest inbound thread (the old racy lookup survives only as a
+  guarded cross-channel fallback).
+- **Cross-process reply stamp** — `session_state.current_reply_route`
+  (outbound.db) replaces our `/tmp/nanoclaw-current-batch.json` sidecar; the
+  MCP child reads it via `getCurrentReplyRoute()`. `in_reply_to` is stamped
+  natively.
+- **Isolated task sessions** — scheduled tasks run in per-series
+  `system:tasks:<seriesId>` sessions; their output reaches chat only via the
+  one-door `send_message({ to })`, so the old stale-seq race cannot occur.
 
-### How It Works
+## The fork divergence (what this install adds)
 
-1. **Router preserves `thread_id` for Telegram** — the thread-collapse check now skips Telegram (`event.channelType !== 'telegram'`)
-2. **Replies route via the batch thread** — `sendToDestination` uses the current batch's own `thread_id` when the destination matches the batch's channel+platform (see "Batch-thread priority" below). This means replies land in the topic the message came from; `resolveDestinationThread` (latest `messages_in` row for the channel) remains only as the cross-destination fallback
-3. **`session_routing` stays as a stable default** — only written on container wake (by `writeSessionRouting`), not updated per-message. It backs the `send_message` MCP tool's no-`to` reply path only when no batch context is available; mid-turn no-`to` sends use the batch's thread (see "Batch-thread priority"), as does `<message>` dispatch
-4. **`writeSessionRouting` preserves existing `thread_id`** — for shared sessions (`session.thread_id = null`), reads back and keeps whatever `thread_id` is already in the DB rather than overwriting with null on every container wake
-5. **Fresh DB connections for routing reads** — `session_routing` is written by the host after spawn. The container uses `openInboundDb()` (fresh read-only connection per call) instead of `getInboundDb()` (stale singleton) to see per-message updates
+1. **Router keeps Telegram's topic id through BOTH thread gates**
+   (`src/router.ts`):
+   - the adapter pre-strip (`!adapter.supportsThreads` → null the thread) is
+     skipped for `channelType === 'telegram'`;
+   - the wiring thread policy (`resolveThreadPolicy` → `threadsEnabled=false`
+     → `effectiveThreadId = null`) keeps the event thread for telegram too.
+   The second gate is the easy one to miss — without it, `messages_in` rows
+   are threadless and everything below starves. Session identity is
+   unaffected: `resolveSession` ignores the thread in `shared` mode, so this
+   only threads the `messages_in` rows.
 
-### Files Changed
+2. **`writeSessionRouting` preserves the bound thread** — shared sessions have
+   `session.thread_id = null`; on wake we carry forward the previously written
+   routing thread (read through the same mailbox handle — `getRouting()`, a
+   fork addition to the seam) instead of nulling it. Backs the
+   `ask_user_question`/`send_card` bound-thread last resort and the agent's
+   self-knowledge. Replies do NOT read this row (upstream reply routing is
+   batch-driven).
+
+3. **Per-topic destinations (pinned `thread_id`)** — `agent_destinations`
+   (central, migration `026`) and the session `destinations` projection carry
+   an optional `thread_id` (`ncl destinations add/update --thread-id`). A
+   pinned thread wins for explicit sends: `resolveRouting` prefers
+   `dest.threadId`, and `resolveDestinationThread` inserts it between the
+   reply branch and latest-inbound. **This is the deterministic task→topic
+   path** — a task session has no reply context, so `send_message({ to:
+   "alerts" })` from one lands in the pinned topic.
+
+4. **`sqliteGetSessionRouting` reopens the inbound DB per read** — the
+   long-lived singleton can hold a stale view of the cross-mounted file
+   (`journal_mode=DELETE` relies on reopen for visibility).
+
+5. **Send results name the resolved thread** — `send_message`/`send_file`
+   results append `thread <id>` so the agent can verify routing instead of
+   filing a false misroute correction.
+
+6. **`telegram-topics` MCP tool** — create/edit forum topics directly
+   (self-gates on `TELEGRAM_BOT_TOKEN`). The Chat SDK Telegram adapter
+   round-trips topics internally, but the NanoClaw adapter integration
+   discards them (`supportsThreads: false`), so the tool calls the Bot API.
+
+## Files
 
 | File | Change |
 |------|--------|
-| `src/router.ts` | Skip thread collapse for Telegram |
-| `src/session-manager.ts` | Preserve `thread_id` on container wake for shared sessions |
-| `container/agent-runner/src/formatter.ts` | `extractRouting` uses last message, not first; task rows win over chat in mixed batches; `RoutingContext` carries `kind` |
-| `container/agent-runner/src/db/session-routing.ts` | Fresh `openInboundDb()` per call + proper `db.close()` |
-| `container/agent-runner/src/poll-loop.ts` | Fresh `openInboundDb()` in `resolveDestinationThread`; batch-thread priority in `sendToDestination`; publishes the batch's `RoutingContext` via `setCurrentBatchRouting` |
-| `container/agent-runner/src/current-batch.ts` | Holds the full batch `RoutingContext` (was: `inReplyTo` only) so MCP tools can resolve threads |
-| `container/agent-runner/src/mcp-tools/core.ts` | `send_message`/`send_file` no-`to` and threadless-dest resolution mirrors dispatch's batch-thread priority (2026-08-24) |
-| `container/agent-runner/src/mcp-tools/telegram-topics.ts` | **New** — `create_topic` + `edit_topic` MCP tools |
-| `container/agent-runner/src/mcp-tools/index.ts` | Barrel registration |
-
-## Design Decisions
-
-### No per-message `upsertSessionRouting`
-
-Early versions updated `session_routing` on every inbound message. This was **removed** because:
-
-- `resolveDestinationThread` already handles reply routing by reading `messages_in` directly — the `session_routing` update was redundant for replies
-- The per-message update made `session_routing` "last writer wins", polluting the stable default that scheduled tasks depend on (e.g. weather briefing routed to whatever topic was last active instead of its intended destination)
-- The agent reads `session_routing` to understand its context — a volatile value confused the agent's self-reported destination
-
-### No per-topic `agent_destinations`
-
-Per-topic entries in `agent_destinations` (e.g. separate entries for "alerts" and "log") cause the agent to fail silently. With multiple destinations, the agent must specify `to=` on every reply — and it often can't pick the right one, producing `<internal>` scratchpad instead of `<message>` blocks. One destination per messaging group is the correct configuration for shared sessions.
-
-> **Nuance (2026-08-21):** installs do run per-topic destinations successfully (e.g. My Claw Squad: `my-claw-squad` + `alerts-topic` + `ways-of-working` on one channel). The failure mode above is about the *reply* path; per-topic dests work when the agent uses `send_message to=<topic-dest>` for explicit targeting, since that path prefers `dest.threadId`. `<message to=<topic-dest>>` blocks route by the conversation's topic regardless of the dest's configured thread — see "Known limitations" under Batch-thread priority.
-
-## Scheduled Task Topic Routing
-
-### Problem
-
-Scheduled tasks (e.g., weather briefings) write to `messages_in` with `thread_id = null`. When the agent dispatches the response, `resolveDestinationThread` queries the latest `messages_in` for the platform — which returns whichever topic had the most recent **user message**, not the topic the task should target.
-
-The result is **non-deterministic routing**: the task output goes to whatever topic was last active, not a configured destination.
-
-### Root cause
-
-`resolveDestinationThread` queries `messages_in ORDER BY seq DESC LIMIT 1` — it returns the most recent message regardless of age or kind. If a user message arrives on topic 51 before the task fires, the agent's reply routes to topic 51 instead of the intended destination.
-
-### Fix: `thread_id` on task `messages_in`
-
-The fix writes the correct `thread_id` onto the task message itself at schedule time, and dispatch trusts the batch's routing row (the task row) rather than re-querying "latest inbound". The routing info travels with the message — `sendToDestination` reads it via `extractRouting`.
-
-**Flow:**
-1. Agent calls `schedule_task` with optional `threadId` parameter (e.g. `"telegram:<chatId>:<topicId>"`)
-2. Container writes the `threadId` into the system action payload
-3. Host's `handleScheduleTask` writes `thread_id` onto the task's `messages_in` row
-4. Task wakes the container → agent processes → dispatches reply
-5. `sendToDestination` uses the **batch's** `thread_id` (the task row's target topic) — see "Batch-thread priority" below
-6. Recurring tasks inherit `thread_id` via `insertRecurrence` — one fix propagates to all future occurrences
-
-### Batch-thread priority (2026-08-21 fix)
-
-The original version of this fix relied on `resolveDestinationThread` finding the task row as the "latest" `messages_in` row. That was subtly wrong: **`resolveDestinationThread` returns the latest row overall, not the latest row in the current batch** — and a recurring task row's `seq` is set when the recurrence is inserted (~a day before it fires). Any chat message that arrives in the group after the recurrence insert outranks the task row by `seq` and steals the routing.
-
-Observed in the wild (shared-session family group): a daily digest dispatched ~2 min after firing; by then a non-alert conversation (higher `seq`) was the latest row → the digest landed in that chat's topic instead of the alerts topic. The same day's weather run only routed correctly because the *next* recurrence row happened to be inserted (by host-sweep timing) between task completion and dispatch — pure luck.
-
-`sendToDestination` now resolves the thread in priority order:
-
-1. **Batch thread** — when the destination's channel+platform matches the current batch's origin, trust the batch's own `thread_id`. For a task batch that's the task row's target topic; for an interactive batch it's the topic the message came from (`null` = platform default topic, preserved as-is).
-2. **Legacy fallback** — a `kind='task'` batch with no `thread_id` falls back to the destination's configured `thread_id`.
-3. **Cross-destination sends** — anything else uses `resolveDestinationThread` (latest inbound row for that channel), then falls back to the destination's configured `thread_id` if the channel has no inbound history.
-
-Two windows where a task's thread could still be stolen were closed alongside:
-
-- **Mixed batches** — `extractRouting` prefers the last `kind='task'` row over the batch's last row. When a due task and a newer chat message land in the same pending batch (container wake collision), the task's target wins, not the chat's topic.
-- **Mid-turn follow-ups** — the follow-up poller re-pins dispatch routing (`extractRouting`) whenever a pushed batch contains a task row. A task becoming due during an active chat turn therefore routes its output to its target; pure-chat follow-ups leave the turn's routing untouched (a reply belongs to the topic the turn started in, not to whatever arrived mid-turn).
-
-This is why `RoutingContext` carries `kind` (`formatter.ts` → `extractRouting`). Interactive replies are never redirected to the destination's default topic — that path only applies to legacy threadless tasks and cross-destination sends. Explicit mid-response sends to a specific topic remain the `send_message` MCP tool's job (`resolveRouting` prefers `dest.threadId` there).
-
-**Known limitations:**
-
-- One `<message to=...>` name per channel cannot address topics individually: with per-topic destinations on one channel, every `<message>` block routes by the conversation's topic, overriding the dest's configured thread. Use `send_message` for topic-targeted sends.
-- Dispatch routing is frozen at batch start (refreshed only by task-carrying follow-ups). For a pure-chat turn, the reply goes to the topic of the message that started the turn even if other topics were active by dispatch time. This is deliberate — the old live-read could land a reply in a topic the sender never wrote in.
-- ~~`send_message` without `to` replies to `session_routing.thread_id`, which is empty for shared sessions → platform default topic (General).~~ **Fixed (2026-08-24):** `send_message`/`send_file` without `to` now resolve the thread the same way dispatch does — the current batch's thread wins when it belongs to the session's channel (the topic an interactive message came from, or a task's target topic), with the same legacy threadless-task fallback to the sole same-channel destination's configured thread. An explicit `to` a *threadless* destination on the session's own channel also uses the batch thread instead of dropping to General; a per-topic destination's configured `thread_id` still wins for explicit targeting. Observed failure that prompted this: a shared-session agent's mid-turn digest re-sends omitted `to` and landed in General five times in a row (the tool's "you can omit `to` with one destination" contract only held when session routing was entirely absent). Prompt flows targeting a *different* topic than the current conversation must still pass `to` with a per-topic destination.
-
-**Admin config:** `ncl destinations update --agent-group-id <id> --local-name <name> --thread-id "telegram:<chatId>:<topicId>"` sets the thread on a destination. The agent can then use this value when calling `schedule_task`.
-
-**Backward compat:** The `threadId` parameter on `schedule_task` is optional. When omitted, the existing behavior applies (reads from `session_routing.thread_id`). Existing tasks keep working until explicitly updated via `update_task --thread-id "..."`.
-
-### Design decisions
-
-**Why not override `sendToDestination`?** If `dest.threadId` always wins in `sendToDestination`, reply routing breaks — user messages from topic 42 would get redirected to the configured default topic. It is therefore only consulted for legacy threadless task batches and as the tail fallback for cross-destination sends with no inbound history; the primary signal is the batch's own thread.
-
-**Why not `session_routing` fallback?** We intentionally removed per-message `upsertSessionRouting` to prevent "last writer wins" pollution. `session_routing` is stable for user conversations but doesn't carry per-topic routing for tasks.
-
-**`send_message` MCP tool (Path B) already respects `dest.threadId`** — it prefers the destination's thread over the session's thread. This is correct for explicit mid-response sends. The fix here covers the `<message>` tag path (Path A), where the agent's response is parsed after the provider returns.
-
-### Related
-
-- See [guide-036](../../dotfiles-vps/docs/guides/guide-036-telegram-topic-routing-upstream-analysis.md) for the full Chat SDK adapter verification and session model analysis.
-
-## Cross-Mount DB Visibility
-
-The container's `session_routing` table is written by the host (on the other side of a Docker volume mount). A long-lived `getInboundDb()` singleton connection freezes its view at the first read and never sees host-side updates. The fix is `openInboundDb()` — opens a fresh read-only connection per call with `mmap_size=0`, then closes it. This pattern applies to any table the host writes to after the container's initial connection was opened.
-
-Key prerequisite: `journal_mode=DELETE` (not WAL) — WAL's mmapped `-shm` file doesn't refresh across mounts. See `container/agent-runner/src/db/connection.ts`.
-
-## MCP Tools
-
-### `create_topic`
-
-Creates a Telegram forum topic in the current group chat. Calls `createForumTopic` directly via `fetch` to the Telegram Bot API (same pattern as the Telegram adapter's internal `telegramFetch`). Returns the `message_thread_id`.
-
-Only registered when `TELEGRAM_BOT_TOKEN` is available (conditional registration at module scope).
-
-### `edit_topic`
-
-Renames an existing forum topic or changes its icon emoji. Calls `editForumTopic` via the Bot API.
-
-## Upstream Rebase Notes
-
-When rebasing `dev` onto a newer `upstream/main`, the feature commits (on `dev` as individual commits) may encounter one known conflict in `src/router.ts`:
-
-- **Interceptor API**: upstream changed from a single `messageInterceptor` to an array `messageInterceptors` with a `for` loop
-- **Adapter lookup**: `getChannelAdapter(event.channelType)` → `getChannelAdapter(event.instance ?? event.channelType)`
-
-Resolution: merge both patterns — keep the interceptor loop + `event.instance` fallback, add the Telegram `&& event.channelType !== 'telegram'` exception.
-
-The convenience branch `feat/telegram-topics` holds a single squashed commit of all changes for easier cherry-pick if the individual commits prove painful during a rebase.
-
-## Upstream Landscape
-
-### Issue #1699 — "Telegram thread/topic replies lose thread context"
-
-Filed by `Davidsod` (2026-04-08) against the v1 codebase. Describes the same symptom (replies land in General instead of the originating topic) and proposes a straightforward plumbing fix: add `thread_id` to messages table, pass it through `sendMessage` call sites. The issue references v1 files (`src/db.ts`, `src/types.ts`) and doesn't address session model or routing architecture. Still open, no comments from upstream maintainer.
-
-### PR #1626 — "Telegram topic isolation with auto-registration"
-
-Filed by `rsdrahat` (open). Implements **per-topic isolation** — each forum topic gets its own virtual messaging group, separate session, separate container. Uses a custom JID scheme (`tg:…:t:42`) to multiplex topics within one supergroup. This is the full isolation approach — equivalent to setting `supportsThreads: true` on the Telegram adapter, but with additional per-topic folder/CLAUDE.md/parent-context seeding.
-
-### Premald's one-liner approach (PR #1626 comment, 2026-06-07)
-
-Community member `premald` demonstrated that the Chat SDK Telegram adapter on the upstream `channels` branch **already round-trips topics natively**:
-
-1. `parseMessage` encodes `thread.id = telegram:<chatId>:<topicId>` from `message_thread_id`
-2. `channelIdFromThreadId` strips the topic back to `telegram:<chatId>` for messaging-group lookup
-3. `postMessage` re-appends `message_thread_id` on send
-
-Combined with NanoClaw's existing per-thread session logic, flipping `supportsThreads: false → true` on the Telegram adapter gives per-topic isolation with **one line changed** — no custom JID scheme, no virtual groups.
-
-**Tradeoff vs our approach:** the one-liner gives per-topic *sessions* (isolated conversation history + correct routing) but **not** per-topic *folders / CLAUDE.md / separate containers* — which PR #1626 adds. Our shared-session approach gives the opposite: shared context across topics with correct reply routing, but no isolation.
-
-### Approach comparison
-
-| Aspect | Upstream (broken) | Premald one-liner | PR #1626 (rsdrahat) | Our implementation |
-|--------|------------------|-------------------|----------------------|-------------------|
-| Session model | One group, no topics | Per-topic isolation | Per-topic isolation | **Shared session** |
-| Conversation history | Lost (all in General) | Isolated per topic | Isolated per topic | **Shared across topics** |
-| Reply routing | Broken | Correct (native) | Correct (custom JID) | Correct (batch-thread priority) |
-| Custom code needed | — | ~1 line | ~500+ lines | ~200 lines |
-| Destination config | 1 per group | 1 per topic | Auto-created | 1 per group |
-| Scheduled task routing | Goes to General | Per-topic session | Per-topic session | Deterministic via task row `thread_id` + batch priority |
-| MCP tools | — | — | — | create_topic + edit_topic |
-| Agent self-awareness | — | Per-topic context | Per-topic context | Knows its topic via session_routing |
-
-### Upstream PR viability
-
-Our implementation is tightly coupled to v2's two-DB session split, cross-mount SQLite semantics, and the shared-session model. A direct upstream PR would need significant reworking:
-
-- **Drop cross-mount `openInboundDb()` changes** — specific to Docker/virtiofs mounts, not relevant to most installs
-- **Adapt router change for `event.instance` pattern** — upstream refactored adapter lookup
-- **Decide on session model** — upstream may prefer per-topic isolation (aligns with existing architecture) over shared sessions
-- **Verify Chat SDK adapter topic support** — if the current `channels` branch adapter already round-trips `message_thread_id`, the router change could be simplified
-
-**Recommended path:** engage on issue #1699 with our findings before writing a PR. The shared-session vs per-topic isolation tradeoff is a design decision that needs upstream maintainer input. Our `resolveDestinationThread` approach (read latest `messages_in` for topic routing) is compatible with either session model and could be a useful building block regardless.
+| `src/router.ts` | Telegram exempt from both thread gates |
+| `src/session-manager.ts` | Preserve routing thread on wake (shared sessions) |
+| `src/mailbox/types.ts`, `src/mailbox/sqlite/*` | `getRouting()` seam read; `thread_id` in destinations schema + lazy migrate |
+| `src/db/migrations/026-destinations-thread-id.ts` | Pinned thread on `agent_destinations` |
+| `src/cli/resources/destinations.ts` | `--thread-id` on add, `update` verb, projection |
+| `container/agent-runner/src/db/session-routing.ts` | `pinnedThreadId` tier in `resolveDestinationThread` |
+| `container/agent-runner/src/destinations.ts` | `DestinationEntry.threadId` |
+| `container/agent-runner/src/mcp-tools/core.ts` | Pinned-thread preference + thread-named results |
+| `container/agent-runner/src/mcp-tools/telegram-topics.ts` | Topic management tool |
+| `container/agent-runner/src/mailbox/sqlite/operations.ts` | Fresh-open session_routing read |
+
+## Operational notes
+
+- Scheduled briefings target a topic via a destination with a pinned
+  `thread_id`; the task prompt says `send_message({ to: "<name>" })`.
+- Un-migrated sessions created before the upgrade already have the
+  `destinations.thread_id` column via the lazy session-DB migrate; central
+  rows came through the fork's earlier migration, which `026` idempotently
+  re-establishes.
+- Upstream issue [#1699](https://github.com/nanocoai/nanoclaw/issues/1699)
+  tracks the topic-routing landscape (Chat SDK round-trip, per-topic
+  isolation PR, our shared-session approach).

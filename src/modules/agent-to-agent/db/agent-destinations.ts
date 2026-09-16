@@ -31,9 +31,13 @@
  * Affected call sites today (keep this list honest if you add more):
  *   - src/delivery.ts::handleSystemAction case 'create_agent'
  *   - src/db/messaging-groups.ts::createMessagingGroupAgent
+ *   - src/cli/resources/destinations.ts::add / remove (admin-time `ncl destinations`
+ *     — iterates over `getSessionsByAgentGroup(agentGroupId)`)
  */
 import type { AgentDestination } from '../../../types.js';
 import { getDb } from '../../../db/connection.js';
+import { log } from '../../../log.js';
+import { deletePoliciesTouching, removeMessagePolicy } from './agent-message-policies.js';
 
 /**
  * ⚠️  Caller responsibility: after this returns, call
@@ -41,73 +45,89 @@ import { getDb } from '../../../db/connection.js';
  * session of that agent group so the change propagates to the running
  * container's inbound.db. See the top-of-file invariant.
  */
-export function createDestination(row: AgentDestination): void {
-  getDb()
-    .prepare(
-      `INSERT INTO agent_destinations (agent_group_id, local_name, target_type, target_id, created_at, thread_id)
-       VALUES (@agent_group_id, @local_name, @target_type, @target_id, @created_at, @thread_id)`,
-    )
-    // Default thread_id to NULL — callers without a per-topic thread
-    // (backfill, createMessagingGroupAgent) omit it, and better-sqlite3
-    // rejects a named parameter that's absent from the bound object.
-    .run({ thread_id: null, ...row });
-}
-
-export function getDestinations(agentGroupId: string): AgentDestination[] {
-  return getDb()
-    .prepare('SELECT * FROM agent_destinations WHERE agent_group_id = ?')
-    .all(agentGroupId) as AgentDestination[];
-}
-
-export function getDestinationByName(agentGroupId: string, localName: string): AgentDestination | undefined {
-  return getDb()
-    .prepare('SELECT * FROM agent_destinations WHERE agent_group_id = ? AND local_name = ?')
-    .get(agentGroupId, localName) as AgentDestination | undefined;
-}
-
-/** Reverse lookup: what does this agent call the given target? */
-export function getDestinationByTarget(
-  agentGroupId: string,
-  targetType: 'channel' | 'agent',
-  targetId: string,
-): AgentDestination | undefined {
-  return getDb()
-    .prepare('SELECT * FROM agent_destinations WHERE agent_group_id = ? AND target_type = ? AND target_id = ?')
-    .get(agentGroupId, targetType, targetId) as AgentDestination | undefined;
-}
-
-/** Permission check: can this agent send to this target? */
-export function hasDestination(agentGroupId: string, targetType: 'channel' | 'agent', targetId: string): boolean {
-  const row = getDb()
-    .prepare('SELECT 1 FROM agent_destinations WHERE agent_group_id = ? AND target_type = ? AND target_id = ? LIMIT 1')
-    .get(agentGroupId, targetType, targetId);
-  return !!row;
+export async function createDestination(row: AgentDestination): Promise<void> {
+  // thread_id defaults to NULL when absent — better-sqlite3 rejects undefined
+  // named params, so the key must exist (the fork's latent-crash fix).
+  await getDb().run(
+    `INSERT INTO agent_destinations (agent_group_id, local_name, target_type, target_id, thread_id, created_at)
+     VALUES (@agent_group_id, @local_name, @target_type, @target_id, @thread_id, @created_at)`,
+    { ...row, thread_id: row.thread_id ?? null },
+  );
 }
 
 /**
- * Update mutable fields on an existing destination row.
- * Currently only `thread_id` is mutable; pass undefined to leave unchanged.
- *
- * ⚠️  Caller responsibility: after this returns, call
- * `writeDestinations(agentGroupId, <sessionId>)` for each active session
- * so the update propagates to the running container's inbound.db.
+ * Delete destination rows whose target no longer resolves — a channel target
+ * whose messaging group was deleted, or an agent target whose agent group is
+ * gone. Without this, projection silently skips the rows (write-destinations)
+ * while the central table keeps ghost entries that drop at send time.
+ * Idempotent; returns the number of rows removed.
  */
-export function updateDestination(
+export async function sweepDanglingDestinations(): Promise<number> {
+  const dangling = await getDb().all<{ agent_group_id: string; local_name: string; target_type: string }>(
+    `SELECT ad.agent_group_id, ad.local_name, ad.target_type
+     FROM agent_destinations ad
+     LEFT JOIN messaging_groups mg ON ad.target_type = 'channel' AND ad.target_id = mg.id
+     LEFT JOIN agent_groups ag ON ad.target_type = 'agent' AND ad.target_id = ag.id
+     WHERE (ad.target_type = 'channel' AND mg.id IS NULL)
+        OR (ad.target_type = 'agent' AND ag.id IS NULL)`,
+  );
+  for (const row of dangling) {
+    await getDb().run(
+      'DELETE FROM agent_destinations WHERE agent_group_id = ? AND local_name = ?',
+      row.agent_group_id,
+      row.local_name,
+    );
+    log.warn('Swept dangling destination (target no longer resolves)', {
+      agentGroupId: row.agent_group_id,
+      localName: row.local_name,
+      targetType: row.target_type,
+    });
+  }
+  return dangling.length;
+}
+
+export async function getDestinations(agentGroupId: string): Promise<AgentDestination[]> {
+  return getDb().all<AgentDestination>('SELECT * FROM agent_destinations WHERE agent_group_id = ?', agentGroupId);
+}
+
+export async function getDestinationByName(
   agentGroupId: string,
   localName: string,
-  updates: { thread_id?: string | null },
-): void {
-  const sets: string[] = [];
-  const params: unknown[] = [];
-  if ('thread_id' in updates) {
-    sets.push('thread_id = ?');
-    params.push(updates.thread_id);
-  }
-  if (sets.length === 0) return;
-  params.push(agentGroupId, localName);
-  getDb()
-    .prepare(`UPDATE agent_destinations SET ${sets.join(', ')} WHERE agent_group_id = ? AND local_name = ?`)
-    .run(...params);
+): Promise<AgentDestination | undefined> {
+  return getDb().get<AgentDestination>(
+    'SELECT * FROM agent_destinations WHERE agent_group_id = ? AND local_name = ?',
+    agentGroupId,
+    localName,
+  );
+}
+
+/** Reverse lookup: what does this agent call the given target? */
+export async function getDestinationByTarget(
+  agentGroupId: string,
+  targetType: 'channel' | 'agent',
+  targetId: string,
+): Promise<AgentDestination | undefined> {
+  return getDb().get<AgentDestination>(
+    'SELECT * FROM agent_destinations WHERE agent_group_id = ? AND target_type = ? AND target_id = ?',
+    agentGroupId,
+    targetType,
+    targetId,
+  );
+}
+
+/** Permission check: can this agent send to this target? */
+export async function hasDestination(
+  agentGroupId: string,
+  targetType: 'channel' | 'agent',
+  targetId: string,
+): Promise<boolean> {
+  const row = await getDb().get(
+    'SELECT 1 FROM agent_destinations WHERE agent_group_id = ? AND target_type = ? AND target_id = ? LIMIT 1',
+    agentGroupId,
+    targetType,
+    targetId,
+  );
+  return !!row;
 }
 
 /**
@@ -115,10 +135,21 @@ export function updateDestination(
  * `writeDestinations(agentGroupId, <sessionId>)` for each active session
  * so the deletion propagates to the running container's inbound.db.
  */
-export function deleteDestination(agentGroupId: string, localName: string): void {
-  getDb()
-    .prepare('DELETE FROM agent_destinations WHERE agent_group_id = ? AND local_name = ?')
-    .run(agentGroupId, localName);
+export async function deleteDestination(agentGroupId: string, localName: string): Promise<void> {
+  // Resolve the target first so we can drop a matching policy for this edge (no ghost gate on re-wire).
+  const row = await getDb().get<{ target_type: string; target_id: string }>(
+    'SELECT target_type, target_id FROM agent_destinations WHERE agent_group_id = ? AND local_name = ?',
+    agentGroupId,
+    localName,
+  );
+  await getDb().run(
+    'DELETE FROM agent_destinations WHERE agent_group_id = ? AND local_name = ?',
+    agentGroupId,
+    localName,
+  );
+  if (row?.target_type === 'agent') {
+    await removeMessagePolicy(agentGroupId, row.target_id);
+  }
 }
 
 /**
@@ -131,10 +162,14 @@ export function deleteDestination(agentGroupId: string, localName: string): void
  * `agentGroupId` as a destination target. Use `getDestinationReferencers`
  * below to find them BEFORE calling this (the rows are gone afterwards).
  */
-export function deleteAllDestinationsTouching(agentGroupId: string): void {
-  getDb()
-    .prepare('DELETE FROM agent_destinations WHERE agent_group_id = ? OR (target_type = ? AND target_id = ?)')
-    .run(agentGroupId, 'agent', agentGroupId);
+export async function deleteAllDestinationsTouching(agentGroupId: string): Promise<void> {
+  await getDb().run(
+    'DELETE FROM agent_destinations WHERE agent_group_id = ? OR (target_type = ? AND target_id = ?)',
+    agentGroupId,
+    'agent',
+    agentGroupId,
+  );
+  await deletePoliciesTouching(agentGroupId);
 }
 
 /**
@@ -144,12 +179,12 @@ export function deleteAllDestinationsTouching(agentGroupId: string): void {
  * projections to refresh after the delete — the rows are gone once the
  * delete runs.
  */
-export function getDestinationReferencers(targetAgentGroupId: string): string[] {
-  const rows = getDb()
-    .prepare(
-      "SELECT DISTINCT agent_group_id FROM agent_destinations WHERE target_type = 'agent' AND target_id = ? AND agent_group_id != ?",
-    )
-    .all(targetAgentGroupId, targetAgentGroupId) as Array<{ agent_group_id: string }>;
+export async function getDestinationReferencers(targetAgentGroupId: string): Promise<string[]> {
+  const rows = await getDb().all<{ agent_group_id: string }>(
+    "SELECT DISTINCT agent_group_id FROM agent_destinations WHERE target_type = 'agent' AND target_id = ? AND agent_group_id != ?",
+    targetAgentGroupId,
+    targetAgentGroupId,
+  );
   return rows.map((r) => r.agent_group_id);
 }
 

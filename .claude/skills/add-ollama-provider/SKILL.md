@@ -130,12 +130,15 @@ file, not from env vars. This file is bind-mounted into the container as `~/.cla
 
 ## 5. Build and restart
 
+Run from your NanoClaw project root:
+
 ```bash
 export PATH="/opt/homebrew/bin:$PATH"
 pnpm run build
-launchctl unload ~/Library/LaunchAgents/com.nanoclaw.plist
-launchctl load ~/Library/LaunchAgents/com.nanoclaw.plist
-# Linux: systemctl --user restart nanoclaw
+source setup/lib/install-slug.sh
+launchctl unload ~/Library/LaunchAgents/$(launchd_label).plist
+launchctl load   ~/Library/LaunchAgents/$(launchd_label).plist
+# Linux: systemctl --user restart $(systemd_unit)
 ```
 
 ## 6. Verify
@@ -147,7 +150,7 @@ Send a message to the agent. Then confirm:
 curl -s http://localhost:11434/api/ps | grep '"name"'
 
 # Container has the right env vars
-CTR=$(docker ps --filter "name=nanoclaw-v2-<FOLDER>" --format "{{.Names}}" | head -1)
+CTR=$(docker ps --filter "label=nanoclaw-group-folder=<FOLDER>" --format "{{.Names}}" | head -1)
 docker inspect "$CTR" --format '{{json .HostConfig.ExtraHosts}}'
 docker exec "$CTR" env | grep ANTHROPIC
 ```

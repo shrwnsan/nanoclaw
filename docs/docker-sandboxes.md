@@ -213,7 +213,7 @@ pnpm exec tsx setup/index.ts --step register \
   --jid "tg:<your-chat-id>" \
   --name "My Chat" \
   --trigger "@nanoclaw" \
-  --folder "telegram_main" \
+  --folder "<your-group-folder>" \
   --channel telegram \
   --assistant-name "nanoclaw" \
   --is-main \
