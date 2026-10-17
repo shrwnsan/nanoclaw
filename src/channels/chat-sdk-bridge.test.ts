@@ -542,3 +542,83 @@ describe('createChatSdkBridge.deliver — display cards (send_card)', () => {
     expect(msg.markdown).toBe('plain hello');
   });
 });
+
+describe('createChatSdkBridge.deliver — entity-parse raw-text fallback', () => {
+  // Telegram's entity parser rejects some content outright (e.g. a bare URL —
+  // "Bad Request: can't parse entities: Can't find end of a URL at byte offset
+  // 120"). The delivery retry loop re-sends the identical payload, so without a
+  // payload swap every attempt fails and the message is dropped permanently.
+  // The bridge must retry the chunk as raw text: no parse mode, the platform
+  // autolinks URLs itself.
+  it('retries a chunk as raw text when the platform rejects its entities', async () => {
+    const calls: PostCall[] = [];
+    let attempts = 0;
+    const postMessage = async (threadId: string, message: AdapterPostableMessage): Promise<RawMessage<unknown>> => {
+      attempts++;
+      if (attempts === 1) {
+        throw new Error("Bad Request: can't parse entities: Can't find end of a URL at byte offset 120");
+      }
+      calls.push({ threadId, message });
+      return { id: 'msg-stub', threadId, raw: {} };
+    };
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage }),
+      supportsThreads: false,
+    });
+    const url =
+      'https://www.fortress.com.hk/en/product/dcm25fw-25l-air-purifying-dehumidifier/p/BP_14057702?variant=14057702';
+    const id = await bridge.deliver('telegram:42', null, {
+      kind: 'chat-sdk',
+      content: { text: url },
+    });
+    expect(attempts).toBe(2);
+    expect(id).toBe('msg-stub');
+    expect(calls).toHaveLength(1);
+    const msg = calls[0].message as { raw?: string; markdown?: string };
+    expect(msg.raw).toBe(url);
+    expect(msg.markdown).toBeUndefined();
+  });
+
+  it('keeps files attached on the raw-text retry', async () => {
+    const calls: PostCall[] = [];
+    let attempts = 0;
+    const postMessage = async (threadId: string, message: AdapterPostableMessage): Promise<RawMessage<unknown>> => {
+      attempts++;
+      if (attempts === 1) {
+        throw new Error("Bad Request: can't parse entities: Can't find end of a URL at byte offset 120");
+      }
+      calls.push({ threadId, message });
+      return { id: 'msg-stub', threadId, raw: {} };
+    };
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage }),
+      supportsThreads: false,
+    });
+    await bridge.deliver('telegram:42', null, {
+      kind: 'chat-sdk',
+      content: { text: 'see https://example.com/a_b' },
+      files: [{ data: Buffer.from('file'), filename: 'report.txt' }],
+    });
+    expect(attempts).toBe(2);
+    const msg = calls[0].message as { raw?: string; markdown?: string; files?: unknown[] };
+    expect(msg.raw).toContain('https://example.com/a_b');
+    expect(msg.markdown).toBeUndefined();
+    expect(msg.files).toHaveLength(1);
+  });
+
+  it('rethrows errors that are not entity-parse rejections', async () => {
+    const postMessage = async (): Promise<RawMessage<unknown>> => {
+      throw new Error('Bad Request: message text is empty');
+    };
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage }),
+      supportsThreads: false,
+    });
+    await expect(
+      bridge.deliver('telegram:42', null, {
+        kind: 'chat-sdk',
+        content: { text: 'hello' },
+      }),
+    ).rejects.toThrow('message text is empty');
+  });
+});
