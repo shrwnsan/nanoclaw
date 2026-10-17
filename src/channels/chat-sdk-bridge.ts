@@ -42,6 +42,21 @@ interface GatewayAdapter extends Adapter {
 export interface ReplyContext {
   text: string;
   sender: string;
+  /**
+   * Platform user id of the replied-to author, when the raw payload exposes
+   * it. Telegram sets it from raw.reply_to_message.from.id so the bot
+   * admission policy (telegram-bot-admission.ts) can recognize "reply to my
+   * own message" — display names are not stable identifiers.
+   */
+  senderUserId?: string;
+  /**
+   * Telegram forum topics: reply_to_message is overloaded — plain topic posts
+   * carry the topic's anchor service message, not a conversational reply.
+   * True when the reply target is that anchor (forum_topic_created, or any
+   * textless message). Extractors set it; the admission policy excludes
+   * anchor "replies" from its reply-to-me leg.
+   */
+  replyToForumTopicAnchor?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -418,6 +433,17 @@ function terminalApprovalMessage(spec: TerminalApprovalCard) {
     card: buildTerminalApprovalCard(spec),
     fallbackText: [spec.title, spec.question, spec.resolution].filter(Boolean).join('\n\n'),
   };
+}
+
+/**
+ * Telegram's entity parser hard-rejects some message bodies ("Bad Request:
+ * can't parse entities: …"), e.g. a bare URL it cannot segment. Matched on the
+ * platform error text rather than an error class: the wording is
+ * Telegram-specific, and no other adapter emits it.
+ */
+export function isEntityParseRejection(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /can't parse entities/i.test(message);
 }
 
 export function splitForLimit(text: string, limit: number): string[] {
@@ -943,10 +969,26 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         for (let i = 0; i < chunks.length; i++) {
           const chunk = chunks[i];
           const attachFiles = i === 0 && fileUploads && fileUploads.length > 0;
-          const result = await adapter.postMessage(
-            tid,
-            attachFiles ? { markdown: chunk, files: fileUploads } : { markdown: chunk },
-          );
+          let result: Awaited<ReturnType<typeof adapter.postMessage>>;
+          try {
+            result = await adapter.postMessage(
+              tid,
+              attachFiles ? { markdown: chunk, files: fileUploads } : { markdown: chunk },
+            );
+          } catch (err) {
+            // Some content the platform's entity parser rejects outright (e.g.
+            // a bare URL under Telegram: "Bad Request: can't parse entities:
+            // Can't find end of a URL at byte offset N"). The delivery retry
+            // loop re-sends the identical payload, so without a payload swap
+            // every attempt fails and the message is dropped. Retry once as
+            // raw text — no parse mode; the platform autolinks URLs itself.
+            if (!isEntityParseRejection(err)) throw err;
+            log.warn('Markdown delivery rejected by platform — retrying chunk as raw text', {
+              threadId: tid,
+              err,
+            });
+            result = await adapter.postMessage(tid, attachFiles ? { raw: chunk, files: fileUploads } : { raw: chunk });
+          }
           if (i === 0) firstId = result?.id;
         }
         return firstId;
