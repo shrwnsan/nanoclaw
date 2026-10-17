@@ -8,6 +8,9 @@ patchedDependencies:
   '@beeper/chat-adapter-matrix@0.2.0':
     hash: d8f9cda088701285b3be191ea30edfd2e96ccb7b97f2934fa8c26c1fa424c020
     path: patches/@beeper__chat-adapter-matrix@0.2.0.patch
+  '@chat-adapter/telegram@4.29.0':
+    hash: 0d3343b56e5d858671ea0dddab57017f09aed74948fdbebcf196c40dbfc2932c
+    path: patches/@chat-adapter__telegram.patch
 
 importers:
 
@@ -42,7 +45,7 @@ importers:
         version: 4.29.0(zod@4.6.5)
       '@chat-adapter/telegram':
         specifier: 4.29.0
-        version: 4.29.0(zod@4.6.5)
+        version: 4.29.0(patch_hash=0d3343b56e5d858671ea0dddab57017f09aed74948fdbebcf196c40dbfc2932c)(zod@4.6.5)
       '@chat-adapter/whatsapp':
         specifier: 4.29.0
         version: 4.29.0(zod@4.6.5)
@@ -3701,7 +3704,7 @@ snapshots:
       - supports-color
       - zod
 
-  '@chat-adapter/telegram@4.29.0(zod@4.6.5)':
+  '@chat-adapter/telegram@4.29.0(patch_hash=0d3343b56e5d858671ea0dddab57017f09aed74948fdbebcf196c40dbfc2932c)(zod@4.6.5)':
     dependencies:
       '@chat-adapter/shared': 4.29.0(zod@4.6.5)
       chat: 4.29.0(zod@4.6.5)

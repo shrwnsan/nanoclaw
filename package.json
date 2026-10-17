@@ -89,7 +89,8 @@
   },
   "pnpm": {
     "patchedDependencies": {
-      "@beeper/chat-adapter-matrix@0.2.0": "patches/@beeper__chat-adapter-matrix@0.2.0.patch"
+      "@beeper/chat-adapter-matrix@0.2.0": "patches/@beeper__chat-adapter-matrix@0.2.0.patch",
+      "@chat-adapter/telegram@4.29.0": "patches/@chat-adapter__telegram.patch"
     }
   }
 }
