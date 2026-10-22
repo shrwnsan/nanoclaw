@@ -156,6 +156,19 @@ describe('composeSessionSpec', () => {
     expect(compose().containers[0].env.NANOCLAW_MAILBOX_BACKEND).toBe('sqlite');
   });
 
+  it('fork: METASEARCH_PROXY_AUTH passes through from host env, presence-only', () => {
+    const prev = process.env.METASEARCH_PROXY_AUTH;
+    try {
+      delete process.env.METASEARCH_PROXY_AUTH;
+      expect(compose().containers[0].env.METASEARCH_PROXY_AUTH).toBeUndefined();
+      process.env.METASEARCH_PROXY_AUTH = '1';
+      expect(compose().containers[0].env.METASEARCH_PROXY_AUTH).toBe('1');
+    } finally {
+      if (prev === undefined) delete process.env.METASEARCH_PROXY_AUTH;
+      else process.env.METASEARCH_PROXY_AUTH = prev;
+    }
+  });
+
   it('the gateway contribution fills the contributed lane last and wins a collision', () => {
     const spec = compose({
       contribution: { env: { HTTPS_PROXY: 'http://provider:1' } },

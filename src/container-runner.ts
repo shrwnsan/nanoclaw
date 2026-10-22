@@ -1101,6 +1101,14 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
   const existingNoProxy = contributedEnv.NO_PROXY ?? env.NO_PROXY;
   env.NO_PROXY = existingNoProxy ? `${existingNoProxy},${LOCAL_NO_PROXY}` : LOCAL_NO_PROXY;
   env.no_proxy = env.NO_PROXY;
+  // fork: meta-search proxy-auth flag — presence-only passthrough so the
+  // meta-search container skill attempts keyed providers without env keys
+  // (the OneCLI gateway injects credentials at the proxy). Read from the
+  // host process env (systemd EnvironmentFile) at spec-compose time; unset
+  // keeps upstream gate semantics byte-for-byte.
+  if (process.env.METASEARCH_PROXY_AUTH) {
+    env.METASEARCH_PROXY_AUTH = process.env.METASEARCH_PROXY_AUTH;
+  }
 
   const hostUid = process.getuid?.();
   const hostGid = process.getgid?.();
