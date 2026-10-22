@@ -1,6 +1,5 @@
 // scripts/handle-web-search.mjs
 import { tavily, extractContent } from './content-extractor.mjs';
-import { handleWebSearchError } from './handle-search-error.mjs';
 import { gitHubService } from './github-service.mjs';
 import { transformToStandard, createErrorResponse } from './response-transformer.mjs';
 
@@ -9,6 +8,14 @@ const TAVILY_API_KEY = process.env.SEARCH_PLUS_TAVILY_API_KEY || process.env.TAV
 const JINA_API_KEY = process.env.SEARCH_PLUS_JINA_API_KEY || process.env.SEARCH_PLUS_JINAAI_API_KEY || process.env.JINA_API_KEY || process.env.JINAAI_API_KEY || null;
 const BRAVE_API_KEY = process.env.SEARCH_PLUS_BRAVE_API_KEY || process.env.BRAVE_API_KEY || null;
 const EXA_API_KEY = process.env.SEARCH_PLUS_EXA_API_KEY || process.env.EXA_API_KEY || null;
+const FIRECRAWL_API_KEY = process.env.SEARCH_PLUS_FIRECRAWL_API_KEY || null;
+// User's own SearXNG instance; often localhost, so it intentionally bypasses the extraction SSRF checks
+const SEARXNG_URL = process.env.SEARCH_PLUS_SEARXNG_URL ? process.env.SEARCH_PLUS_SEARXNG_URL.trim().replace(/\/+$/, '') : null;
+const SEARXNG_API_KEY = process.env.SEARCH_PLUS_SEARXNG_API_KEY || null;
+// fork (nanoclaw): with METASEARCH_PROXY_AUTH=1 the OneCLI egress proxy injects
+// API credentials at request time, so keyed services are attempted even without
+// an env key — the request goes out unauthenticated and the proxy adds auth.
+const PROXY_AUTH = process.env.METASEARCH_PROXY_AUTH === '1';
 
 // Show deprecation warnings for old variable names
 if (!process.env.SEARCH_PLUS_TAVILY_API_KEY && process.env.TAVILY_API_KEY) {
@@ -81,8 +88,7 @@ export async function handleWebSearch(params) {
       query,
       maxResults: params.maxResults || 5,
       includeAnswer: params.includeAnswer !== false,
-      includeRawContent: params.includeRawContent || false,
-      headers: generateRandomHeaders()
+      includeRawContent: params.includeRawContent || false
     };
 
     const result = await performHybridSearch(searchParams, timeout);
@@ -95,107 +101,241 @@ export async function handleWebSearch(params) {
     };
 
   } catch (error) {
+    // The only reachable throw is the all-failed error from performHybridSearch;
+    // recovery choreography (handle-search-error.mjs) was removed as dead code.
     console.error('All search strategies failed:', error.message);
-
-    // Final error handling for recovery attempts
-    const errorResult = await handleWebSearchError(error, {
-      query,
-      maxResults: params.maxResults || 5,
-      includeAnswer: params.includeAnswer || true,
-      includeRawContent: params.includeRawContent || false,
-      headers: generateRandomHeaders(),
-      timeout,
-      attempt: 1,
-      error: error
-    });
-
-    if (errorResult && errorResult.success) {
-      return {
-        success: true,
-        data: errorResult.data,
-        attempt: 1,
-        errorRecovered: true,
-        originalError: error.message,
-        recoveryMessage: errorResult.message
-      };
-    }
-
     return {
       error: true,
-      message: errorResult?.message || error.message,
-      attempt: 1,
-      errorHandlingApplied: true
+      message: error.message,
+      attempt: 1
     };
   }
 }
 
 /**
  * Hybrid web search with intelligent service selection
- * Sequential: Tavily → Brave → Exa → Jina Search
- *
- * Each service is always attempted. If the env var is set, auth is sent explicitly.
- * If not, the request goes without auth — the OneCLI proxy injects credentials.
+ * Sequential: SearXNG (self-hosted) → Tavily → Brave → Exa → Jina Search → Firecrawl (keyless)
  */
 export async function performHybridSearch(params, timeoutMs = 10000) {
-  // Phase 1: Try Tavily API (premium, best RAG integration)
-  try {
-    console.log('🚀 Trying Tavily API...');
-    const startTime = Date.now();
-    const rawResult = await tavily.search(params, timeoutMs);
-    const responseTime = Date.now() - startTime;
+  // Phase 0: Try the user's self-hosted SearXNG instance (no per-query cost)
+  if (SEARXNG_URL) {
+    try {
+      console.log('🔎 Trying SearXNG...');
+      const result = await trySearxngSearch(params, timeoutMs);
+      console.log('✅ Success with SearXNG');
+      return result;
+    } catch (error) {
+      console.log(`❌ SearXNG failed: ${error.message}`);
+    }
+  }
 
-    const standardizedResult = transformToStandard('tavily', rawResult, params.query, responseTime);
-    return { data: standardizedResult, service: 'tavily' };
-  } catch (error) {
-    console.log('🔄 Tavily failed, trying Brave Search...');
+  // Phase 1: Try Tavily API (premium, best RAG integration)
+  // fork: keyed phases are gated on key-or-proxy so upstream default behavior
+  // (skip when unkeyed) is unchanged when METASEARCH_PROXY_AUTH is unset.
+  if (TAVILY_API_KEY || PROXY_AUTH) {
+    try {
+      console.log('🚀 Trying Tavily API...');
+      const startTime = Date.now();
+      const rawResult = await tavily.search(params, timeoutMs);
+      if (!rawResult?.results?.length) {
+        throw new Error('No results found from Tavily');
+      }
+      const responseTime = Date.now() - startTime;
+
+      const standardizedResult = transformToStandard('tavily', rawResult, params.query, responseTime);
+      return { data: standardizedResult, service: 'tavily' };
+    } catch (error) {
+      console.log('🔄 Tavily failed, trying Brave Search...');
+    }
   }
 
   // Phase 2: Try Brave Search API (independent index, fastest)
-  try {
-    console.log('🦁 Trying Brave Search...');
-    const result = await tryBraveSearch(params, timeoutMs);
-    console.log('✅ Success with Brave Search');
-    return result;
-  } catch (error) {
-    console.log(`❌ Brave Search failed: ${error.message}`);
+  if (BRAVE_API_KEY || PROXY_AUTH) {
+    try {
+      console.log('🦁 Trying Brave Search...');
+      const result = await tryBraveSearch(params, timeoutMs);
+      console.log('✅ Success with Brave Search');
+      return result;
+    } catch (error) {
+      console.log(`❌ Brave Search failed: ${error.message}`);
+    }
   }
 
   // Phase 3: Try Exa AI (semantic/neural search)
-  try {
-    console.log('🔬 Trying Exa Search...');
-    const result = await tryExaSearch(params, timeoutMs);
-    console.log('✅ Success with Exa Search');
-    return result;
-  } catch (error) {
-    console.log(`❌ Exa Search failed: ${error.message}`);
+  if (EXA_API_KEY || PROXY_AUTH) {
+    try {
+      console.log('🔬 Trying Exa Search...');
+      const result = await tryExaSearch(params, timeoutMs);
+      console.log('✅ Success with Exa Search');
+      return result;
+    } catch (error) {
+      console.log(`❌ Exa Search failed: ${error.message}`);
+    }
   }
 
   // Phase 4: Try Jina Search API (last resort)
+  if (JINA_API_KEY || PROXY_AUTH) {
+    try {
+      console.log('🔍 Trying Jina Search (s.jina.ai)...');
+      const result = await tryJinaSearch(params, timeoutMs);
+      console.log('✅ Success with Jina Search');
+      return result;
+    } catch (error) {
+      console.log(`❌ Jina Search failed: ${error.message}`);
+    }
+  }
+
+  // Phase 5: Firecrawl Search (keyless tier works without signup; key raises limits)
   try {
-    console.log('🔍 Trying Jina Search (s.jina.ai)...');
-    const result = await tryJinaSearch(params, timeoutMs);
-    console.log('✅ Success with Jina Search');
+    console.log('🔥 Trying Firecrawl Search...');
+    const result = await tryFirecrawlSearch(params, timeoutMs);
+    console.log('✅ Success with Firecrawl Search');
     return result;
   } catch (error) {
-    console.log(`❌ Jina Search failed: ${error.message}`);
+    console.log(`❌ Firecrawl Search failed: ${error.message}`);
   }
 
   throw new Error(
-    'All search services failed. Configure at least one API key or OneCLI proxy secret:\n' +
+    'All search services failed (including keyless Firecrawl). Configure an API key for higher limits:\n' +
     '  • SEARCH_PLUS_TAVILY_API_KEY (recommended, 1000 free searches/month at tavily.com)\n' +
     '  • SEARCH_PLUS_BRAVE_API_KEY ($5 free credits/month at brave.com/search/api)\n' +
     '  • SEARCH_PLUS_EXA_API_KEY (1000 free searches/month at exa.ai)\n' +
     '  • SEARCH_PLUS_JINA_API_KEY (10M free tokens at jina.ai)\n' +
-    '  • Or add Generic Secrets in OneCLI dashboard for any of the above\n' +
+    '  • SEARCH_PLUS_FIRECRAWL_API_KEY (1,000 free credits/month at firecrawl.dev)\n' +
+    '  • SEARCH_PLUS_SEARXNG_URL (your own SearXNG instance, e.g. http://localhost:8080)\n' +
     'See: https://github.com/shrwnsan/vibekit-claude-plugins/tree/main/plugins/search-plus#setup-options'
   );
 }
 
 /**
- * Attempts web search using Jina.ai Search API (s.jina.ai)
- * Requires SEARCH_PLUS_JINA_API_KEY
+ * Attempts web search using a self-hosted SearXNG instance.
+ * Requires SEARCH_PLUS_SEARXNG_URL; SEARCH_PLUS_SEARXNG_API_KEY is sent as a Bearer token if set.
+ */
+async function trySearxngSearch(params, timeoutMs = 10000) {
+  if (!SEARXNG_URL) {
+    throw new Error('SearXNG URL not configured');
+  }
+
+  const maxResults = params.maxResults || 5;
+  const startTime = Date.now();
+  const searchUrl = `${SEARXNG_URL}/search?q=${encodeURIComponent(params.query)}&format=json`;
+
+  const response = await fetch(searchUrl, {
+    method: 'GET',
+    headers: {
+      'Accept': 'application/json',
+      ...(SEARXNG_API_KEY ? { 'Authorization': `Bearer ${SEARXNG_API_KEY}` } : {})
+    },
+    signal: AbortSignal.timeout(timeoutMs)
+  });
+
+  if (response.status === 403) {
+    throw new Error('SearXNG error: 403 (JSON output is likely disabled; add "json" to search.formats in the instance settings.yml)');
+  }
+  if (!response.ok) {
+    throw new Error(`SearXNG error: ${response.status}`);
+  }
+
+  const data = await response.json();
+
+  // SearXNG returns { results: [{ title, url, content, publishedDate, engine }] }
+  const results = (data.results || []).slice(0, maxResults).map(item => ({
+    title: item.title || '',
+    url: item.url || '',
+    content: item.content || '',
+    published_date: item.publishedDate || null,
+    engine: item.engine || null
+  }));
+
+  if (results.length === 0) {
+    throw new Error('No results found from SearXNG');
+  }
+
+  const standardizedResult = transformToStandard('searxng', { results }, params.query, Date.now() - startTime);
+  return { data: standardizedResult, service: 'searxng' };
+}
+
+/**
+ * Attempts web search using Firecrawl Search API.
+ * Works without a key (keyless tier, rate-limited per IP); SEARCH_PLUS_FIRECRAWL_API_KEY raises limits.
+ */
+async function tryFirecrawlSearch(params, timeoutMs = 10000) {
+  const startTime = Date.now();
+  const response = await fetch('https://api.firecrawl.dev/v2/search', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(FIRECRAWL_API_KEY ? { 'Authorization': `Bearer ${FIRECRAWL_API_KEY}` } : {})
+    },
+    body: JSON.stringify({ query: params.query, limit: params.maxResults || 5 }),
+    signal: AbortSignal.timeout(timeoutMs)
+  });
+
+  if (!response.ok) {
+    throw new Error(`Firecrawl Search error: ${response.status}`);
+  }
+
+  const data = await response.json();
+
+  // Firecrawl returns { data: { web: [{ url, title, description }] } }
+  const results = (data.data?.web || []).map(item => ({
+    title: item.title || '',
+    url: item.url || '',
+    content: item.description || item.markdown || ''
+  }));
+
+  if (results.length === 0) {
+    throw new Error('No results found from Firecrawl Search');
+  }
+
+  const standardizedResult = transformToStandard('firecrawl', { results }, params.query, Date.now() - startTime);
+  return { data: standardizedResult, service: 'firecrawl' };
+}
+
+/**
+ * Formats a handleWebSearch() result as compact markdown for the model.
+ * Raw JSON (scores, metadata, every attempt) costs tokens without helping the answer.
+ * @param {Object} result - Successful result from handleWebSearch()
+ * @returns {string} Markdown
+ */
+export function formatResult(result) {
+  const data = result.data;
+  if (typeof data === 'string') return data;
+
+  // URL extraction
+  if (result.isURLExtraction) {
+    const title = data.metadata?.title;
+    return [
+      title ? `# ${title}` : null,
+      `Source: ${data.url} (via ${data.service})`,
+      '',
+      typeof data.content === 'string' ? data.content.trim() : JSON.stringify(data.content, null, 2)
+    ].filter(line => line !== null).join('\n');
+  }
+
+  // Web search
+  const lines = [`Search results for "${data.query}" (via ${data.service || result.service})`, ''];
+  if (data.answer) lines.push(`Answer: ${data.answer}`, '');
+  (data.results || []).forEach((r, i) => {
+    lines.push(`${i + 1}. [${r.title || r.url}](${r.url})${r.published_date ? ` (${r.published_date.slice(0, 10)})` : ''}`);
+    if (r.content) {
+      const snippet = r.content.replace(/\s+/g, ' ').trim();
+      lines.push(`   ${snippet.length > 800 ? snippet.slice(0, 800) + '…' : snippet}`);
+    }
+  });
+  return lines.join('\n');
+}
+
+/**
+ * Attempts web search using Jina.ai Search API (s.jina.ai).
+ * If JINA_API_KEY env var is set, sends Bearer header.
+ * If not, sends no auth — relies on proxy (OneCLI) to inject credentials.
  */
 async function tryJinaSearch(params, timeoutMs = 10000) {
+  if (!JINA_API_KEY && !PROXY_AUTH) {
+    throw new Error('Jina API key not configured');
+  }
+
   const query = encodeURIComponent(params.query);
   const maxResults = params.maxResults || 5;
 
@@ -242,10 +382,15 @@ async function tryJinaSearch(params, timeoutMs = 10000) {
 }
 
 /**
- * Attempts web search using Brave Search API
- * Requires SEARCH_PLUS_BRAVE_API_KEY
+ * Attempts web search using Brave Search API.
+ * If BRAVE_API_KEY env var is set, sends X-Subscription-Token header.
+ * If not, sends no auth — relies on proxy (OneCLI) to inject credentials.
  */
 async function tryBraveSearch(params, timeoutMs = 10000) {
+  if (!BRAVE_API_KEY && !PROXY_AUTH) {
+    throw new Error('Brave API key not configured');
+  }
+
   const query = encodeURIComponent(params.query);
   const maxResults = Math.min(params.maxResults || 5, 20);
 
@@ -293,17 +438,20 @@ async function tryBraveSearch(params, timeoutMs = 10000) {
 }
 
 /**
- * Attempts web search using Exa AI Search API
- * Requires SEARCH_PLUS_EXA_API_KEY
+ * Attempts web search using Exa AI Search API.
+ * If EXA_API_KEY env var is set, sends x-api-key header.
+ * If not, sends no auth — relies on proxy (OneCLI) to inject credentials.
  */
 async function tryExaSearch(params, timeoutMs = 10000) {
+  if (!EXA_API_KEY && !PROXY_AUTH) {
+    throw new Error('Exa API key not configured');
+  }
+
   const maxResults = params.maxResults || 5;
 
   const startTime = Date.now();
 
-  const headers = {
-    'Content-Type': 'application/json',
-  };
+  const headers = { 'Content-Type': 'application/json' };
   if (EXA_API_KEY) {
     headers['x-api-key'] = EXA_API_KEY;
   }
@@ -345,28 +493,6 @@ async function tryExaSearch(params, timeoutMs = 10000) {
   const standardizedResult = transformToStandard('exa', standardResponse, params.query, responseTime);
 
   return { data: standardizedResult, service: 'exa' };
-}
-
-/**
- * Generate random headers to avoid detection
- * @returns {Object} Random headers object
- */
-function generateRandomHeaders() {
-  const userAgents = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:89.0) Gecko/20100101 Firefox/89.0'
-  ];
-  
-  return {
-    'User-Agent': userAgents[Math.floor(Math.random() * userAgents.length)],
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.5',
-    'Accept-Encoding': 'gzip, deflate',
-    'Connection': 'keep-alive',
-    'Upgrade-Insecure-Requests': '1',
-  };
 }
 
 /**
@@ -474,15 +600,27 @@ async function handleURLExtraction(url, options = {}) {
         await new Promise(resolve => setTimeout(resolve, delay));
       }
       
-      // Try to extract content with custom headers
+      // Don't spoof browser headers: they get API requests challenged by Cloudflare (e.g. r.jina.ai → 403)
       const extractOptions = {
-        headers: generateRandomHeaders(),
         includeImages: false, // Don't include images by default for faster processing
         ...options
       };
-      
+
       const results = await extractContent(url, extractOptions);
-      
+
+      // extractContent already walks every service; a failed result is final, not retryable
+      if (!results.success) {
+        const tried = (results.allResults || []).map(r => `${r.service}: ${(r.error?.message || 'empty content').slice(0, 200)}`);
+        return {
+          error: true,
+          message: tried.length
+            ? `Failed to extract content from URL. Tried:\n  - ${tried.join('\n  - ')}`
+            : `Failed to extract content from URL: ${results.error?.message || 'unknown error'}`,
+          attempt: attempt + 1,
+          isURLExtraction: true
+        };
+      }
+
       return {
         success: true,
         data: results,

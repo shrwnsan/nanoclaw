@@ -18,7 +18,7 @@ done
 |---|---|---|
 | `weather` | `01c5c01e`, `60867fc5`, `ca923606`, `0589e466` | Bun-runtime rewrite chain, final v0.3.4 (Open-Meteo, UV index, HH:MM sunrise/sunset local time). 55 files — includes vendored app. Copy final state; don't replay the chain. |
 | `tg-logs` | `818bd17f`, `86c86a73`, `33a0cb71`, `52be6b7c` | Reads the tg-topic-ingest SQLite DB (bind-mounted outside the repo). `--rolling-hours` + `--use-content-time` included in final state. |
-| `meta-search` | `a36f3c4a` + `a4afe440` | `a4afe440` adds OneCLI proxy credential injection to the scripts — final state already includes it. |
+| `meta-search` | `a36f3c4a` + `a4afe440`; re-vendored from shrwnsan/agents `5c0d6db` (2026-10-22) | Fork mod: OneCLI proxy credential injection, flag-gated as `METASEARCH_PROXY_AUTH=1` (set in `~/.config/nanoclaw/environment`; unset keeps upstream gate semantics byte-for-byte and the vendored test suite green). Re-vendor recipe: copy hub `skills/meta-search` over this dir → re-apply the flag pattern (grep `PROXY_AUTH` in `handle-web-search.mjs` + `content-extractor.mjs`: gate = `\|\| PROXY_AUTH`, early-throw = `&& !PROXY_AUTH`, headers conditional on key; pin `'METASEARCH_PROXY_AUTH'` into `PROVIDER_ENV` in `scripts/tests/search-providers.test.mjs`) → run `node --test scripts/tests/*.test.mjs` in an upstream plugin layout rig (`<rig>/plugins/search-plus/skills/meta-search` + a stub `<rig>/plugins/search-plus/docs/CONFIGURATION.md` naming `SEARCH_PLUS_404_MODE SEARCH_PLUS_GITHUB_CACHE_TTL SEARCH_PLUS_GITHUB_ENABLED`) → expect 119/119 with the flag both set and unset. |
 | `remotion` | `a36f3c4a` | 1 file. |
 | `slack-formatting` | `a36f3c4a` | 1 file. Coexists with upstream trunk skills. |
 | `systematic-debugging` | `a36f3c4a` | 2 files. |
