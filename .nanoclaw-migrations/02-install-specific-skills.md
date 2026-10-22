@@ -1,13 +1,13 @@
 # Section 02 — Install-specific container skills
 
-All 8 skills are self-contained directories under `container/skills/`. Upstream has none of them (trunk ships: `agent-browser`, `frontend-engineer`, `onecli-gateway`, `self-customize`, `welcome`). Port = copy the final directory state from the fork's `dev` (`ded5eb95`) tree into the upgraded worktree. No registration step: trunk container skills are discovered by directory listing.
+All 10 skills are self-contained directories under `container/skills/`. Upstream has none of them (trunk ships: `agent-browser`, `frontend-engineer`, `onecli-gateway`, `self-customize`, `welcome`). Port = copy the final directory state from the fork's `dev` (`ded5eb95`) tree into the upgraded worktree. No registration step: trunk container skills are discovered by directory listing.
 
 ## How to apply
 
 ```bash
 DEV=/home/ubuntu/nanoclaw        # main tree still on dev during replay
 WT=/home/ubuntu/nanoclaw/.upgrade-worktree
-for s in weather tg-logs meta-search remotion slack-formatting systematic-debugging tailnet-cdp vercel-cli; do
+for s in weather tg-logs meta-search remotion slack-formatting systematic-debugging tailnet-cdp vercel-cli lightpanda-text sumi; do
   cp -a "$DEV/container/skills/$s" "$WT/container/skills/$s"
 done
 ```
@@ -18,12 +18,14 @@ done
 |---|---|---|
 | `weather` | `01c5c01e`, `60867fc5`, `ca923606`, `0589e466` | Bun-runtime rewrite chain, final v0.3.4 (Open-Meteo, UV index, HH:MM sunrise/sunset local time). 55 files — includes vendored app. Copy final state; don't replay the chain. |
 | `tg-logs` | `818bd17f`, `86c86a73`, `33a0cb71`, `52be6b7c` | Reads the tg-topic-ingest SQLite DB (bind-mounted outside the repo). `--rolling-hours` + `--use-content-time` included in final state. |
-| `meta-search` | `a36f3c4a` + `a4afe440` | `a4afe440` adds OneCLI proxy credential injection to the scripts — final state already includes it. |
+| `meta-search` | `a36f3c4a` + `a4afe440`; re-vendored from shrwnsan/agents `5c0d6db` (2026-10-22) | Fork mod: OneCLI proxy credential injection, flag-gated as `METASEARCH_PROXY_AUTH=1` (set in `~/.config/nanoclaw/environment`; unset keeps upstream gate semantics byte-for-byte and the vendored test suite green). Re-vendor recipe: copy hub `skills/meta-search` over this dir → re-apply the flag pattern (grep `PROXY_AUTH` in `handle-web-search.mjs` + `content-extractor.mjs`: gate = `\|\| PROXY_AUTH`, early-throw = `&& !PROXY_AUTH`, headers conditional on key; pin `'METASEARCH_PROXY_AUTH'` into `PROVIDER_ENV` in `scripts/tests/search-providers.test.mjs`) → run `node --test scripts/tests/*.test.mjs` in an upstream plugin layout rig (`<rig>/plugins/search-plus/skills/meta-search` + a stub `<rig>/plugins/search-plus/docs/CONFIGURATION.md` naming `SEARCH_PLUS_404_MODE SEARCH_PLUS_GITHUB_CACHE_TTL SEARCH_PLUS_GITHUB_ENABLED`) → expect 119/119 with the flag both set and unset. |
 | `remotion` | `a36f3c4a` | 1 file. |
 | `slack-formatting` | `a36f3c4a` | 1 file. Coexists with upstream trunk skills. |
 | `systematic-debugging` | `a36f3c4a` | 2 files. |
 | `tailnet-cdp` | `a36f3c4a` | 1 file. |
 | `vercel-cli` | `a36f3c4a` | 1 file. Companion to the `vercel` package the agent may invoke; image-side install stays as upstream ships it (Vercel CLI went opt-in upstream — our Dockerfile does NOT re-add it globally; agents use the skill's documented flow). |
+| `lightpanda-text` | vendored 2026-10-22 (host skill → container copy, this install) | Text extraction via the host-side Lightpanda CDP endpoint (`LIGHTPANDA_ENDPOINT`, default `ws://172.17.0.1:9224/`). Requires the host `lightpanda` container to be up (see `~/dotfiles-vps/docs/guides/guide-057-lightpanda-text-extraction-engine.md`); inside agent containers the default host-gateway IP applies. `references/deployment.md` carries fleet docker-net IPs that drift — informational, not config. |
+| `sumi` | vendored from `shrwnsan/sumi@178b515` 2026-10-22 | Deployment copy per its `PROVENANCE.md` (vendor-and-pin; canonical source is the sumi repo, not this tree). Requires the host `sumi` service (`SUMI_BASE_URL`, default `host.docker.internal:8765`). Re-vendor by copying the three files + re-filling PROVENANCE commit/date. |
 
 ## Verify after copy
 

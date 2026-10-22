@@ -65,3 +65,7 @@ Upstream model selection is DB-driven (`container_configs.model` + `NANOCLAW_DEF
 ## 1.9 pnpm supply-chain keep
 
 Keep the fork's `pnpm-workspace.yaml`: top-level `minimumReleaseAge: 4320` + comment (upstream's `pnpm:`-nested form is silently ignored — a no-op gate), plus `better-sqlite3` in `onlyBuiltDependencies`. Merge in any NEW upstream `onlyBuiltDependencies` entries only after human review (CLAUDE.md supply-chain rule).
+
+## 1.10 METASEARCH_PROXY_AUTH spawn passthrough (added 2026-10-22, `addd13bd`)
+
+Install-level container env flag for the `meta-search` container skill (see §02): presence-only passthrough in `composeSessionSpec()` (`src/container-runner.ts`), immediately after the §1.4 NO_PROXY merge — `if (process.env.METASEARCH_PROXY_AUTH) env.METASEARCH_PROXY_AUTH = process.env.METASEARCH_PROXY_AUTH;`. The value lives in the systemd EnvironmentFile (`~/.config/nanoclaw/environment`), which is host **process.env** — the file is NOT read per-spawn, and container env is an explicitly assembled allowlist, so a new env-file entry without this wiring reaches nothing. Deliberately in `composeSessionSpec` (like §1.4), NOT the provider contribution lane (§1.8's home): the flag is install-wide, not model-provider-specific. Container env is a spawn-time snapshot — groups need one container respawn after a host restart to pick it up. Test: `container-runner.test.ts` "fork: METASEARCH_PROXY_AUTH passes through".

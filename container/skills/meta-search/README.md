@@ -10,8 +10,12 @@ Recovers web content when Claude Code's built-in search fails. Part of the [sear
 | `SEARCH_PLUS_BRAVE_API_KEY` | No | Brave Search API | $5 free credits/month |
 | `SEARCH_PLUS_EXA_API_KEY` | No | Exa AI Search | 1,000 searches/month |
 | `SEARCH_PLUS_JINA_API_KEY` | No | Jina.ai reader API | 10M free tokens |
+| `SEARCH_PLUS_FIRECRAWL_API_KEY` | No | Firecrawl search/scrape | Keyless tier without it; 1,000 credits/month with a free key |
+| `SEARCH_PLUS_SEARXNG_URL` | No | Your self-hosted SearXNG instance, tried first for search (e.g. `http://localhost:8080`) | Free (self-hosted) |
+| `SEARCH_PLUS_SEARXNG_API_KEY` | No | Bearer token, only if your SearXNG instance requires auth | — |
+| `SEARCH_PLUS_DEBUG` | No | Set to `1` to print progress logs to stderr | — |
 
-Without API keys, web search will fail. URL extraction still works via Jina.ai Public Reader (20 RPM, no key). Sign up for free API keys at tavily.com (1,000/month) or jina.ai (10M tokens).
+Works without API keys: URL extraction first asks the origin for markdown directly (`Accept: text/markdown`, used only when the server actually serves it), then falls back to Jina Reader (20 RPM), Firecrawl, Defuddle, and the Wayback Machine; search falls back to Firecrawl's keyless tier. Keys raise limits and add providers.
 
 ## Sandbox configuration
 
@@ -28,7 +32,10 @@ When Claude Code's sandbox is enabled, add the extraction service domains to `al
         "api.exa.ai",
         "s.jina.ai",
         "r.jina.ai",
-        "api.jina.ai"
+        "api.jina.ai",
+        "api.firecrawl.dev",
+        "defuddle.md",
+        "archive.org"
       ]
     }
   }
@@ -44,10 +51,8 @@ For best results with sandbox enabled, configure API keys for Tavily and/or Jina
 | `SKILL.md` | Skill instructions loaded by Claude Code |
 | `scripts/search.mjs` | Main recovery script |
 | `scripts/content-extractor.mjs` | URL content extraction logic |
-| `scripts/handle-search-error.mjs` | Search error recovery handler |
 | `scripts/handle-web-search.mjs` | Web search orchestration |
-| `scripts/handle-rate-limit.mjs` | Rate limit handling |
-| `scripts/hook-entry.mjs` | PostToolUse hook entry point |
+| `scripts/hook-entry.mjs` | PostToolUse / PostToolUseFailure hook entry point |
 | `scripts/response-transformer.mjs` | Response format transformation |
 | `scripts/search-response.mjs` | Response formatting |
 | `scripts/security-utils.mjs` | Security utilities |
