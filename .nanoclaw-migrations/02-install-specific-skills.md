@@ -1,13 +1,13 @@
 # Section 02 — Install-specific container skills
 
-All 8 skills are self-contained directories under `container/skills/`. Upstream has none of them (trunk ships: `agent-browser`, `frontend-engineer`, `onecli-gateway`, `self-customize`, `welcome`). Port = copy the final directory state from the fork's `dev` (`ded5eb95`) tree into the upgraded worktree. No registration step: trunk container skills are discovered by directory listing.
+All 10 skills are self-contained directories under `container/skills/`. Upstream has none of them (trunk ships: `agent-browser`, `frontend-engineer`, `onecli-gateway`, `self-customize`, `welcome`). Port = copy the final directory state from the fork's `dev` (`ded5eb95`) tree into the upgraded worktree. No registration step: trunk container skills are discovered by directory listing.
 
 ## How to apply
 
 ```bash
 DEV=/home/ubuntu/nanoclaw        # main tree still on dev during replay
 WT=/home/ubuntu/nanoclaw/.upgrade-worktree
-for s in weather tg-logs meta-search remotion slack-formatting systematic-debugging tailnet-cdp vercel-cli; do
+for s in weather tg-logs meta-search remotion slack-formatting systematic-debugging tailnet-cdp vercel-cli lightpanda-text sumi; do
   cp -a "$DEV/container/skills/$s" "$WT/container/skills/$s"
 done
 ```
@@ -24,6 +24,8 @@ done
 | `systematic-debugging` | `a36f3c4a` | 2 files. |
 | `tailnet-cdp` | `a36f3c4a` | 1 file. |
 | `vercel-cli` | `a36f3c4a` | 1 file. Companion to the `vercel` package the agent may invoke; image-side install stays as upstream ships it (Vercel CLI went opt-in upstream — our Dockerfile does NOT re-add it globally; agents use the skill's documented flow). |
+| `lightpanda-text` | vendored 2026-10-22 (host skill → container copy, this install) | Text extraction via the host-side Lightpanda CDP endpoint (`LIGHTPANDA_ENDPOINT`, default `ws://172.17.0.1:9224/`). Requires the host `lightpanda` container to be up (see `~/dotfiles-vps/docs/guides/guide-057-lightpanda-text-extraction-engine.md`); inside agent containers the default host-gateway IP applies. `references/deployment.md` carries fleet docker-net IPs that drift — informational, not config. |
+| `sumi` | vendored from `shrwnsan/sumi@178b515` 2026-10-22 | Deployment copy per its `PROVENANCE.md` (vendor-and-pin; canonical source is the sumi repo, not this tree). Requires the host `sumi` service (`SUMI_BASE_URL`, default `host.docker.internal:8765`). Re-vendor by copying the three files + re-filling PROVENANCE commit/date. |
 
 ## Verify after copy
 
