@@ -1407,6 +1407,19 @@ export async function buildAgentGroupImage(agentGroupId: string): Promise<void> 
   }
 
   let dockerfile = `FROM ${CONTAINER_IMAGE}\nUSER root\n`;
+  if (aptPackages.includes('tailscale')) {
+    // Tailscale is not in Debian's default repos — it distributes via its own
+    // apt repo, so set that up before the generic install line below. We use
+    // Tailscale's official bookworm pair: the keyring is already dearmored,
+    // and the .list pins signed-by to the keyring path below. The suite is
+    // hardcoded bookworm — bump alongside the base image.
+    dockerfile +=
+      'RUN apt-get update' +
+      ' && apt-get install -y --no-install-recommends ca-certificates curl' +
+      ' && curl -fsSL https://pkgs.tailscale.com/stable/debian/bookworm.noarmor.gpg -o /usr/share/keyrings/tailscale-archive-keyring.gpg' +
+      ' && curl -fsSL https://pkgs.tailscale.com/stable/debian/bookworm.tailscale-keyring.list -o /etc/apt/sources.list.d/tailscale.list' +
+      ' && rm -rf /var/lib/apt/lists/*\n';
+  }
   if (aptPackages.length > 0) {
     dockerfile += `RUN apt-get update && apt-get install -y ${aptPackages.join(' ')} && rm -rf /var/lib/apt/lists/*\n`;
   }
