@@ -16,10 +16,10 @@ docker run -d --name lightpanda \
   --memory=2g --memory-swap=2g --shm-size=256m --pids-limit=256 \
   -e LIGHTPANDA_DISABLE_TELEMETRY=true \
   -p 172.17.0.1:9224:9222 \
-  --network cdp-net \
+  --network <cdp-network> \
   lightpanda/browser@sha256:5b84708cb3d9bef841aba4a4cd299f4de0609ac1bd7d4c6fbfcbf168d56b685e \
   /bin/lightpanda serve --host 0.0.0.0 --port 9222 --log_level info --block-private-networks
-docker network connect hermes_default lightpanda
+docker network connect <hermes-network> lightpanda
 ```
 
 Endpoints (re-check after recreate). The script's baked-in default is the first
@@ -29,8 +29,13 @@ from a different network path or after a recreate:
 | Reachable from | Endpoint |
 |---|---|
 | host / harness | `ws://172.17.0.1:9224/` |
-| hermes_default members | `ws://172.18.0.5:9222/` |
-| cdp-net members | `ws://172.20.0.5:9222/` |
+| `<hermes-network>` members | `ws://<network-gateway-ip>:9222/` |
+| `<cdp-network>` members | `ws://<network-gateway-ip>:9222/` |
+
+Concrete network names/gateway IPs for a given install are inventory, not
+architecture — they live in that install's private ops guide (this fork
+deliberately carries placeholders; `docker network inspect <network>` gives
+the current gateway IP, which drifts on every recreate anyway).
 
 Nothing else lives on the host (binary/unit/ufw entry all removed). **Rollback:**
 `docker rm -f lightpanda` — the image digest in the run command is the record.
@@ -61,7 +66,7 @@ the browser — never install it. The pip wheel is mislabeled but bundles the sa
 
 - CDP-driven SSRF probes against the live serve — cloud metadata
   (`169.254.169.254`), docker bridges, RFC1918 host → all `Navigation failed:
-  CouldntConnect`; a live ufw-allowed caddy on `10.0.0.200:80` also unreachable
+  CouldntConnect`; a live ufw-allowed LAN caddy also unreachable
   ⇒ `--block-private-networks` genuinely works. Positive control (example.com)
   extracted real text.
 - **Lane rules:** bulk text/JS extraction of semi-trusted targets only. No
