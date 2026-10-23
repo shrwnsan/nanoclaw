@@ -7,9 +7,9 @@ deploy step diffs the trees and fails loudly on drift; spec-003 §2.3).
 
 | field | value |
 |---|---|
-| Source repo | `github.com/shrwnsan/sumi` |
+| Source repo | private (name withheld from the public fork; owner has it) |
 | Source path | `skills/sumi/` (`SKILL.md`, `reference/schema.md`, `scripts/sumi-drain.mjs`) |
-| Source commit | `178b515` (shrwnsan/sumi HEAD 2026-10-22, tree verified identical) |
+| Source commit | `178b515` (source HEAD 2026-10-22, tree verified identical) |
 | Copied on | 2026-10-22 |
 | Taxonomy basis | `internal/taxonomy/taxonomy.go` v1 — embedded as a literal list in `scripts/sumi-drain.mjs`; re-extract on any taxonomy version bump |
 
