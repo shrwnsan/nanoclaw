@@ -1,0 +1,57 @@
+diff --git a/dist/index.d.ts b/dist/index.d.ts
+index cbdfc7b1ae95ffe9808e84afcc460a69e6a2cec6..9e3955c8584ef76f37673d68c40be24b8257c548 100644
+--- a/dist/index.d.ts
++++ b/dist/index.d.ts
+@@ -358,7 +358,15 @@ declare class TelegramAdapter implements Adapter<TelegramThreadId, TelegramRawMe
+     protected handleIncomingMessageUpdate(telegramMessage: TelegramMessage, options?: WebhookOptions): void;
+     protected handleCallbackQuery(callbackQuery: TelegramCallbackQuery, options?: WebhookOptions): void;
+     protected handleMessageReactionUpdate(reactionUpdate: TelegramMessageReactionUpdated, options?: WebhookOptions): void;
+-    postMessage(threadId: string, message: AdapterPostableMessage): Promise<RawMessage<TelegramRawMessage>>;
++    postMessage(threadId: string, message: AdapterPostableMessage, opts?: {
++        /**
++         * NanoClaw patch: when set, the text send goes out as a native
++         * Telegram reply to this platform message id (reply_parameters,
++         * allow_sending_without_reply). Text sends only — document and
++         * attachment sends ignore it.
++         */
++        replyToMessageId?: string;
++    }): Promise<RawMessage<TelegramRawMessage>>;
+     postChannelMessage(channelId: string, message: AdapterPostableMessage): Promise<RawMessage<TelegramRawMessage>>;
+     editMessage(threadId: string, messageId: string, message: AdapterPostableMessage): Promise<RawMessage<TelegramRawMessage>>;
+     deleteMessage(threadId: string, messageId: string): Promise<void>;
+diff --git a/dist/index.js b/dist/index.js
+index 33eb3679bad53e5225f2f4098eb99f7c131d76ba..0e6fda75a13f3dc0efeda9bcb817c6bba5622e56 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -821,7 +821,7 @@ var TelegramAdapter = class {
+       }
+     }
+   }
+-  async postMessage(threadId, message) {
++  async postMessage(threadId, message, opts) {
+     const parsedThread = this.resolveThreadId(threadId);
+     const card = extractCard(message);
+     const replyMarkup = card ? cardToTelegramInlineKeyboard(card) : void 0;
+@@ -888,9 +888,22 @@ var TelegramAdapter = class {
+       if (!text.trim()) {
+         throw new ValidationError2("telegram", "Message text cannot be empty");
+       }
++      const replyParameters = (() => {
++        if (opts?.replyToMessageId === void 0) return void 0;
++        const compositeMatch = String(opts.replyToMessageId).match(MESSAGE_ID_PATTERN);
++        const parsedReplyId = Number.parseInt(
++          compositeMatch ? compositeMatch[2] : String(opts.replyToMessageId),
++          10
++        );
++        return Number.isFinite(parsedReplyId) ? {
++          message_id: parsedReplyId,
++          allow_sending_without_reply: true
++        } : void 0;
++      })();
+       rawMessage = await this.telegramFetch("sendMessage", {
+         chat_id: parsedThread.chatId,
+         message_thread_id: parsedThread.messageThreadId,
++        ...replyParameters ? { reply_parameters: replyParameters } : {},
+         text,
+         reply_markup: replyMarkup,
+         parse_mode: toBotApiParseMode(parseMode)
