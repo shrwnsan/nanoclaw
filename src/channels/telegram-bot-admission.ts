@@ -17,10 +17,11 @@
     (one chatty peer cannot starve the others).
  *
  * Everything else bot-authored is dropped at the door with one host-side log
- * line (reason: wrong_chat | wrong_topic | not_addressed | throttled) — it
- * never reaches the router, so no approvals, no dropped_messages rows, no
- * container wakes. Human traffic (isBot !== true) passes through untouched:
- * the policy is strictly additive over the existing admission paths.
+ * line (reason: wrong_chat | wrong_topic | not_addressed | throttled |
+ * reply_depth) — it never reaches the router, so no approvals, no
+ * dropped_messages rows, no container wakes. Human traffic (isBot !== true)
+ * passes through untouched: the policy is strictly additive over the existing
+ * admission paths.
  *
  * Gate order note: this policy sits at the bridge (upstream of the router),
  * so the router's members/unknown-sender gate runs AFTER it. That ordering is
@@ -34,6 +35,95 @@
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
 import { registerBridgeInboundPolicy, type BridgeInboundPolicy } from './chat-sdk-bridge.js';
+
+/** Version-agnostic adapter surface — the outbound seam only touches postMessage. */
+type AdapterLike = { postMessage: unknown };
+
+/**
+ * Reply targets recorded by the doorman: the platform message id of each
+ * admitted peer-bot message, per instance+thread. The outbound seam consumes
+ * a target (one shot, TTL-bounded) to send the agent's next post in that
+ * thread as a native Telegram reply — how the peer's reply-to-me admission
+ * leg gets exercised without a mention.
+ */
+export class BotReplyTargets {
+  private readonly entries = new Map<string, { messageId: string; at: number }>();
+  private readonly ttlMs: number;
+  private readonly now: () => number;
+
+  constructor(opts: { ttlMs?: number; now?: () => number } = {}) {
+    this.ttlMs = opts.ttlMs ?? 900_000;
+    this.now = opts.now ?? Date.now;
+  }
+
+  record(instanceKey: string, threadId: string, messageId: string): void {
+    if (!messageId) return;
+    const t = this.now();
+    // Sweep expired entries so admits whose reply never comes don't accumulate.
+    for (const [key, entry] of this.entries) {
+      if (t - entry.at >= this.ttlMs) this.entries.delete(key);
+    }
+    this.entries.set(`${instanceKey}:${threadId}`, { messageId, at: t });
+  }
+
+  /** One-shot consume: the target id once, then (or past TTL) undefined. */
+  take(instanceKey: string, threadId: string): string | undefined {
+    const key = `${instanceKey}:${threadId}`;
+    const entry = this.entries.get(key);
+    if (!entry) return undefined;
+    this.entries.delete(key);
+    if (this.now() - entry.at >= this.ttlMs) return undefined;
+    return entry.messageId;
+  }
+}
+
+/**
+ * Production store shared by the doorman (writer) and the outbound seam
+ * (reader). One instance per process; tests build their own.
+ */
+export const botReplyTargets = new BotReplyTargets();
+
+/**
+ * Wrap an adapter's outbound post so the next post in a thread with a pending
+ * reply target goes out as a native Telegram reply. In-place instance wrap:
+ * the adapter's own postChannelMessage delegates through `this.postMessage`,
+ * so one wrap covers both entry points. The third argument is understood by
+ * the patched @chat-adapter/telegram postMessage (see patches/).
+ */
+export function createTelegramReplySeam<A extends AdapterLike>(
+  adapter: A,
+  targets: BotReplyTargets,
+  instanceKey: string,
+): A {
+  // Bind: postMessage is a prototype method on the real adapter — calling the
+  // bare reference would run with `this` undefined and throw on the first send.
+  const original = (
+    adapter.postMessage as unknown as (
+      threadId: string,
+      message: unknown,
+      opts?: { replyToMessageId?: string },
+    ) => Promise<unknown>
+  ).bind(adapter);
+  adapter.postMessage = async (threadId: string, message: unknown) => {
+    // Reply semantics live on the text send path (the patch's sendMessage
+    // branch), so a file-bearing post must neither consume the target nor
+    // carry it — the next text post stays the reply.
+    if (typeof message === 'object' && message !== null && ('files' in message || 'attachments' in message)) {
+      return original(threadId, message);
+    }
+    const replyToMessageId = targets.take(instanceKey, threadId);
+    if (replyToMessageId === undefined) return original(threadId, message);
+    try {
+      return await original(threadId, message, { replyToMessageId });
+    } catch (err) {
+      // A failed send must not silently spend the reply: restore the target
+      // (fresh TTL) so the retry still goes out as the native reply.
+      targets.record(instanceKey, threadId, replyToMessageId);
+      throw err;
+    }
+  };
+  return adapter;
+}
 
 /** One allowlisted chat (+ optional topic). chatId keeps its string form (negative for groups). */
 export interface BotAdmissionEntry {
@@ -85,8 +175,22 @@ export interface BotAdmissionOptions {
   botUsernameFor: (instanceKey: string) => Promise<string | undefined>;
   /** Minimum gap between admitted turns per peer. Default 30 s. */
   minGapMs?: number;
+  /**
+   * Loop terminator: how many admissions in a row per peer may arrive via the
+   * reply leg (native reply to the bot's message) before the gate starts
+   * dropping them (`reply_depth`). A start-anchored-mention admit resets the
+   * streak. Bounds an obedient mutual-reply ping-pong to a fixed number of
+   * LLM turns per mention; 0 disables the cap. Default 10.
+   */
+  maxConsecutiveReplyAdmits?: number;
   /** Injectable clock for tests. */
   now?: () => number;
+  /**
+   * Reply-target store: an admitted bot message's platform id is recorded so
+   * the outbound seam can send the agent's next post in the thread as a
+   * native reply to it. Absent = no recording (plain gate behavior).
+   */
+  replyTargets?: BotReplyTargets;
 }
 
 /** Escape a username for literal embedding in the addressing regex. */
@@ -103,6 +207,7 @@ function escapeUsername(username: string): string {
  */
 export function createTelegramBotAdmissionWrap(options: BotAdmissionOptions): BridgeInboundPolicy {
   const minGapMs = options.minGapMs ?? 30_000;
+  const maxReplyStreak = options.maxConsecutiveReplyAdmits ?? 10;
   const now = options.now ?? Date.now;
   return async (setup, instanceKey) => {
     const [botUserId, botUsername] = await Promise.all([
@@ -129,6 +234,8 @@ export function createTelegramBotAdmissionWrap(options: BotAdmissionOptions): Br
     // Throttle window is per PEER, not per bot: one chatty peer cannot starve
     // the others in a 1-to-many setup.
     const lastAdmitBySender = new Map<string, number>();
+    // Consecutive reply-leg admits per peer — the mechanical loop breaker.
+    const replyStreakBySender = new Map<string, number>();
     return {
       ...setup,
       onInbound(platformId, threadId, message) {
@@ -182,8 +289,28 @@ export function createTelegramBotAdmissionWrap(options: BotAdmissionOptions): Br
           drop('throttled', chatId, topic);
           return;
         }
+        // Loop terminator: a mention admit resets the peer's streak; a
+        // reply-leg admit consumes one unit and is dropped past the cap, so a
+        // mutual-reply ping-pong terminates mechanically per peer.
+        if (maxReplyStreak > 0) {
+          if (anchored) {
+            replyStreakBySender.set(senderKey, 0);
+          } else {
+            const streak = (replyStreakBySender.get(senderKey) ?? 0) + 1;
+            if (streak > maxReplyStreak) {
+              drop('reply_depth', chatId, topic);
+              return;
+            }
+            replyStreakBySender.set(senderKey, streak);
+          }
+        }
         lastAdmitBySender.set(senderKey, t);
         log.info('Telegram bot inbound admitted', { instance: instanceKey, senderBotId, chatId, topic });
+        // The admitted message becomes the thread's reply target: the agent's
+        // next outbound post there is sent as a native reply to it (one shot).
+        if (options.replyTargets && typeof threadId === 'string') {
+          options.replyTargets.record(instanceKey, threadId, message.id);
+        }
         // Every admitted bot message stamps isMention so mention-mode wirings
         // engage downstream with zero router changes.
         return hostOnInbound(platformId, threadId, { ...message, isMention: true });
@@ -222,11 +349,13 @@ export async function fetchBotUsername(token: string): Promise<string | undefine
 export function buildTelegramBotAdmission(
   env: Record<string, string>,
   fetchUsername: (token: string) => Promise<string | undefined> = fetchBotUsername,
+  replyTargets: BotReplyTargets = botReplyTargets,
 ): BridgeInboundPolicy | null {
   const allow = parseBotInboundEnv(env.TELEGRAM_BOT_INBOUND);
   if (allow.length === 0) return null;
   return createTelegramBotAdmissionWrap({
     allow,
+    replyTargets,
     botUserIdFor: (instanceKey) => {
       const token = env[tokenEnvKey(instanceKey)];
       return token ? token.split(':')[0] : undefined;

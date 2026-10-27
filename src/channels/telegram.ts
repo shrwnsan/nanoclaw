@@ -21,7 +21,7 @@ import { createChatSdkBridge, type ReplyContext } from './chat-sdk-bridge.js';
 import { registerChannelAdapter } from './channel-registry.js';
 import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage } from './adapter.js';
 import { tryConsume } from './telegram-pairing.js';
-import { registerTelegramBotAdmission } from './telegram-bot-admission.js';
+import { botReplyTargets, createTelegramReplySeam, registerTelegramBotAdmission } from './telegram-bot-admission.js';
 
 /**
  * Dedicated bot identity, non-threaded platform (supportsThreads:false), so
@@ -387,7 +387,11 @@ export function createTelegramBridge(options: TelegramBridgeOptions = {}): Chann
     mode: 'polling',
   });
   const bridge = createChatSdkBridge({
-    adapter: telegramAdapter,
+    // Bot-to-bot reply seam: when the doorman admits a peer bot's message, the
+    // agent's next post in that thread goes out as a native Telegram reply to
+    // it. With no pending target the wrap is a pass-through, so an inactive
+    // gate (TELEGRAM_BOT_INBOUND unset) changes nothing.
+    adapter: createTelegramReplySeam(telegramAdapter, botReplyTargets, instanceKey),
     instance: options.instanceKey, // undefined ⇒ default instance (keyed by channelType)
     concurrency: 'concurrent',
     extractReplyContext,

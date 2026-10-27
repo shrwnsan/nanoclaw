@@ -4,13 +4,18 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  '@chat-adapter/telegram':
+    hash: 0d3343b56e5d858671ea0dddab57017f09aed74948fdbebcf196c40dbfc2932c
+    path: patches/@chat-adapter__telegram.patch
+
 importers:
 
   .:
     dependencies:
       '@chat-adapter/telegram':
         specifier: 4.29.0
-        version: 4.29.0
+        version: 4.29.0(patch_hash=0d3343b56e5d858671ea0dddab57017f09aed74948fdbebcf196c40dbfc2932c)
       '@clack/core':
         specifier: ^1.2.0
         version: 1.2.0
@@ -1417,7 +1422,7 @@ snapshots:
       - supports-color
       - zod
 
-  '@chat-adapter/telegram@4.29.0':
+  '@chat-adapter/telegram@4.29.0(patch_hash=0d3343b56e5d858671ea0dddab57017f09aed74948fdbebcf196c40dbfc2932c)':
     dependencies:
       '@chat-adapter/shared': 4.29.0
       chat: 4.29.0
