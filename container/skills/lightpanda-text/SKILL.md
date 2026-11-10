@@ -1,13 +1,17 @@
 ---
 name: lightpanda-text
-description: Extract page text from JS-rendered sites via the host-side Lightpanda browser over raw CDP (zero dependencies, Node built-ins only). Use when a target returns 0 or garbage text under the default browser/fetch path and you need a second, independent egress path, or for bulk text-only sweeps of JS-heavy pages. Not for screenshots, logins, or bot-wall bypass.
+description: Extract page text from JS-rendered sites via the host-side Lightpanda browser. Preferred client is agent-browser in CDP mode (≥0.39.1); zero-dependency fallback is the raw-CDP script (Node built-ins only). Use when a target returns 0 or garbage text under the default browser/fetch path and you need a second, independent egress path, or for bulk text-only sweeps of JS-heavy pages. Not for screenshots, logins, or bot-wall bypass.
+compatibility: Requires network reach to a host-side Lightpanda CDP daemon (default ws://172.17.0.1:9224/), Node >=18 with native WebSocket, and agent-browser >=0.39.1 for the preferred client; the outbound proxy env must be strippable.
 ---
 
-# Lightpanda Text Extraction (interim path)
+# Lightpanda Text Extraction
 
-Text/JS extraction via the host-side Lightpanda 1.0.0 daemon, driven over raw CDP with Node's native WebSocket — no packages, no image rebuild. Script: `scripts/cdp-fetch.mjs`.
+Text/JS extraction via the host-side Lightpanda 1.0.0 daemon. Two clients:
 
-**Status: interim escape hatch** — agent-browser stays the default browser. Daemon deployment shape, endpoints, connection quirks, security gates, and the revisit triggers for a permanent path live in [references/deployment.md](references/deployment.md).
+- **agent-browser in CDP mode** (preferred; verified 2026-10-22 on 0.39.1): `agent-browser --cdp ws://172.17.0.1:9224/ open <url>`
+- **Raw CDP, zero dependencies**: `scripts/cdp-fetch.mjs` (Node built-ins only) — the fallback when agent-browser isn't at hand or its proxy env can't be stripped
+
+**Status: no longer blocked** — the 2026-10-05 blockers (agent-browser 0.27.1 silent fallback, the #1671 bump ceiling, glibc) all cleared with the 2026-10-22 base-image bump (0.39.1 fleet-wide; #1671 does not reproduce). Daemon deployment shape, endpoints, connection quirks, security gates, and revisit triggers live in [references/deployment.md](references/deployment.md).
 
 ## When to use
 
@@ -24,12 +28,18 @@ Text/JS extraction via the host-side Lightpanda 1.0.0 daemon, driven over raw CD
 ## Usage
 
 ```bash
-# Proxy env MUST be stripped — Node's global WebSocket rides EnvHttpProxyAgent,
-# and extending NO_PROXY alone is NOT sufficient (verified 2026-10-05)
+# Preferred: agent-browser CDP mode (≥0.39.1, verified 2026-10-22).
+# The first command after switching engines may error once — retry it.
+agent-browser --cdp ws://172.17.0.1:9224/ open <url>
+agent-browser --cdp ws://172.17.0.1:9224/ eval document.body.innerText.slice(0,600)
+
+# Zero-dep fallback (Node built-ins only). Proxy env MUST be stripped — Node's
+# global WebSocket rides EnvHttpProxyAgent, and extending NO_PROXY alone is NOT
+# sufficient (verified 2026-10-05)
 env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy \
   node scripts/cdp-fetch.mjs <url> [wsEndpoint]
 
-# Endpoint precedence: argv[3] > $LIGHTPANDA_ENDPOINT > default ws://172.17.0.1:9224/
+# Endpoint precedence (script): argv[3] > $LIGHTPANDA_ENDPOINT > default ws://172.17.0.1:9224/
 # (this box's host-gateway IP — other machines/paths: see references/deployment.md)
 ```
 
@@ -41,7 +51,7 @@ Output: JSON `{title, len, text}` (text capped at 600 chars for a quick read). B
 2. **Strip proxy env** before invoking, or the WS upgrade fails with a non-101 error. Purely client-side; the endpoint itself answers 101.
 3. **Node's native WebSocket sends no Origin header** — that is why the Node client passes where Origin-sending clients (some Python libs) get 403.
 4. **Lane limits**: text/JS extraction only — no DOMSnapshot; screenshots are placeholders.
-5. **agent-browser 0.27.1 must not be the client** for remote Lightpanda: it silently falls back to local chromium even after a successful CDP connect, and its Lightpanda spawn path is broken on this version. In any remote/connect browser flow, assert which engine actually answered via `eval navigator.userAgent`.
+5. **Assert the engine, always**: in any remote/connect browser flow, verify via `eval navigator.userAgent` (expect `Lightpanda/1.0`). History: agent-browser ≤0.27.1 silently fell back to local chromium even on a successful CDP connect — fixed by 0.39.1 (verified 2026-10-22), but the assertion costs nothing and outlasts version pins.
 6. Close your targets when done — the script does this on exit; if you roll your own client, do the same.
 
 ## Troubleshooting

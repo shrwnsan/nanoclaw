@@ -16,23 +16,36 @@ const pending = new Map();
 const send = (method, params = {}, sessionId) =>
   new Promise((resolve, reject) => {
     const id = ++mid;
-    pending.set(id, { resolve, reject });
+    const timer = setTimeout(() => { if (pending.has(id)) { pending.delete(id); reject(new Error('timeout: ' + method)); } }, 30000);
+    pending.set(id, { resolve, reject, timer });
     ws.send(JSON.stringify({ id, method, params, ...(sessionId && { sessionId }) }));
-    setTimeout(() => { if (pending.has(id)) { pending.delete(id); reject(new Error('timeout: ' + method)); } }, 30000);
   });
 ws.onmessage = (ev) => {
-  const d = JSON.parse(ev.data);
-  if (d.id && pending.has(d.id)) { const p = pending.get(d.id); pending.delete(d.id); d.error ? p.reject(new Error(d.error.message)) : p.resolve(d.result); }
+  let d;
+  try { d = JSON.parse(ev.data); } catch { return; } // ignore non-JSON frames
+  if (d.id && pending.has(d.id)) { const p = pending.get(d.id); pending.delete(d.id); clearTimeout(p.timer); d.error ? p.reject(new Error(d.error.message)) : p.resolve(d.result); }
 };
 ws.onerror = (e) => { console.error('WS error:', e.message ?? e); process.exit(2); };
-await new Promise((res, rej) => { ws.onopen = res; setTimeout(() => rej(new Error('connect timeout')), 10000); });
-const { targetId } = await send('Target.createTarget', { url });
-const { sessionId } = await send('Target.attachToTarget', { targetId, flatten: true });
-await new Promise(r => setTimeout(r, 6000)); // let JS render
-const ev = await send('Runtime.evaluate', {
-  expression: `JSON.stringify({title: document.title, len: (document.body?.innerText ?? '').length, text: (document.body?.innerText ?? '').slice(0, 600)})`,
-  returnByValue: true,
-}, sessionId);
-console.log(JSON.parse(ev.result.value).text ? JSON.stringify(JSON.parse(ev.result.value), null, 1) : ev.result.value);
-await send('Target.closeTarget', { targetId });
-ws.close();
+await new Promise((res, rej) => {
+  const t = setTimeout(() => rej(new Error('connect timeout')), 10000);
+  ws.onopen = () => { clearTimeout(t); res(); };
+});
+let targetId = null;
+try {
+  ({ targetId } = await send('Target.createTarget', { url }));
+  const { sessionId } = await send('Target.attachToTarget', { targetId, flatten: true });
+  await new Promise(r => setTimeout(r, 6000)); // let JS render
+  const ev = await send('Runtime.evaluate', {
+    expression: `JSON.stringify({title: document.title, len: (document.body?.innerText ?? '').length, text: (document.body?.innerText ?? '').slice(0, 600)})`,
+    returnByValue: true,
+  }, sessionId);
+  console.log(JSON.parse(ev.result.value).text ? JSON.stringify(JSON.parse(ev.result.value), null, 1) : ev.result.value);
+} finally {
+  // Rule 6 on every path: no orphaned targets on the shared daemon, socket
+  // always closed. If the socket is no longer OPEN there is nothing to send;
+  // swallow close errors — the failure that got us here matters more.
+  if (targetId !== null && ws.readyState === WebSocket.OPEN) {
+    await send('Target.closeTarget', { targetId }).catch(() => {});
+  }
+  ws.close();
+}
