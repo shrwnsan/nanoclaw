@@ -18,15 +18,20 @@ Connect to the shared headless Chromium instance running on the host via CDP (Ch
 
 Containers access the host directly via HTTP. Remote agents use tailnet TLS.
 
+The tailnet hostname is install-specific inventory — this copy deliberately
+carries the `<tailnet-host>` placeholder; the canonical value lives in the
+install's private ops guide (same convention as lightpanda-text's
+`references/deployment.md`).
+
 | Purpose | Container URL | Tailnet URL |
 |---------|--------------|-------------|
-| CDP info (WebSocket URL) | `http://host.docker.internal:9222/json/version` | `https://oci-prime.tailea9a52.ts.net:8443/json/version` |
-| List targets | `http://host.docker.internal:9222/json/list` | `https://oci-prime.tailea9a52.ts.net:8443/json/list` |
-| New tab | `http://host.docker.internal:9222/json/new?<url>` | `https://oci-prime.tailea9a52.ts.net:8443/json/new?<url>` |
-| Service status | `http://host.docker.internal:9221/chromium/status` | `https://oci-prime.tailea9a52.ts.net:9220/chromium/status` |
-| Start service | `POST http://host.docker.internal:9221/chromium/start` | `POST https://oci-prime.tailea9a52.ts.net:9220/chromium/start` |
+| CDP info (WebSocket URL) | `http://host.docker.internal:9222/json/version` | `https://<tailnet-host>:8443/json/version` |
+| List targets | `http://host.docker.internal:9222/json/list` | `https://<tailnet-host>:8443/json/list` |
+| New tab | `http://host.docker.internal:9222/json/new?<url>` | `https://<tailnet-host>:8443/json/new?<url>` |
+| Service status | `http://host.docker.internal:9221/chromium/status` | `https://<tailnet-host>:9220/chromium/status` |
+| Start service | `POST http://host.docker.internal:9221/chromium/start` | `POST https://<tailnet-host>:9220/chromium/start` |
 
-**Container access requires the Host header:** HAProxy filters by `Host: oci-prime.tailea9a52.ts.net` on all CDP requests.
+**Container access requires the Host header:** HAProxy filters by `Host: <tailnet-host>` on all CDP requests.
 
 ## Connecting with Puppeteer
 
@@ -35,7 +40,7 @@ const puppeteer = require('puppeteer-core');
 
 // 1. Get WebSocket URL from CDP info (container path with Host header)
 const info = await (await fetch('http://host.docker.internal:9222/json/version', {
-  headers: { Host: 'oci-prime.tailea9a52.ts.net' }
+  headers: { Host: '<tailnet-host>' }
 })).json();
 // info.webSocketDebuggerUrl = "ws://localhost/devtools/browser/<guid>"
 
@@ -74,13 +79,13 @@ curl -s http://host.docker.internal:9221/chromium/status
 curl -s -X POST http://host.docker.internal:9221/chromium/start
 
 # Get CDP info (Host header required)
-curl -s -H "Host: oci-prime.tailea9a52.ts.net" http://host.docker.internal:9222/json/version
+curl -s -H "Host: <tailnet-host>" http://host.docker.internal:9222/json/version
 
 # List open tabs
-curl -s -H "Host: oci-prime.tailea9a52.ts.net" http://host.docker.internal:9222/json/list
+curl -s -H "Host: <tailnet-host>" http://host.docker.internal:9222/json/list
 
 # Open a new tab
-curl -s -H "Host: oci-prime.tailea9a52.ts.net" "http://host.docker.internal:9222/json/new?https://example.com"
+curl -s -H "Host: <tailnet-host>" "http://host.docker.internal:9222/json/new?https://example.com"
 ```
 
 ## WebSocket URL rewrite
@@ -93,7 +98,7 @@ curl -s -H "Host: oci-prime.tailea9a52.ts.net" "http://host.docker.internal:9222
 2. **Don't close tabs you didn't open.** This is a shared browser — other agents may have active sessions.
 3. **Close your own pages when done** — use `page.close()`, not `browser.close()` or `browser.disconnect()`.
 4. **Session staleness:** If you get "session not found" or "target closed", close the page and reconnect. The watchdog may have restarted Chrome.
-5. **Host header required** for CDP requests: always pass `Host: oci-prime.tailea9a52.ts.net` in HTTP headers. HAProxy filters by Host header.
+5. **Host header required** for CDP requests: always pass `Host: <tailnet-host>` in HTTP headers. HAProxy filters by Host header.
 6. **No GPU** — avoid WebGL-heavy pages.
 
 ## Troubleshooting
@@ -101,7 +106,7 @@ curl -s -H "Host: oci-prime.tailea9a52.ts.net" "http://host.docker.internal:9222
 | Symptom | Fix |
 |---------|-----|
 | Connection refused | Service is down: `POST http://host.docker.internal:9221/chromium/start` |
-| 403 Forbidden | Missing Host header — add `Host: oci-prime.tailea9a52.ts.net` |
+| 403 Forbidden | Missing Host header — add `Host: <tailnet-host>` |
 | "session not found" | Chrome restarted — close page, reconnect |
 | WebSocket fails | Rewrite `ws://localhost` → `ws://host.docker.internal:9222` |
 | Slow rendering | Shared resource with no GPU — expect delays on heavy pages |

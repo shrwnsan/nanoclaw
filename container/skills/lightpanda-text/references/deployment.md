@@ -2,7 +2,7 @@
 
 Distilled from the host box's deployment evaluation so this skill is
 self-contained when copied outside the dotfiles repo (container mounts, other
-machines). Deployed 2026-10-04 on oci-prime; verified in-container 2026-10-05.
+machines). Deployed 2026-10-04 on the host box; verified in-container 2026-10-05.
 **IPs drift on recreate** — re-check `docker inspect lightpanda` after any
 container recreate.
 
@@ -75,23 +75,37 @@ the browser — never install it. The pip wheel is mislabeled but bundles the sa
   chromium lanes. Lightpanda changes **egress, not fingerprint**: IP-reputation
   challenges (Vercel checkpoint, Cloudflare) still gate it (verified 2026-10-05).
 
-## Why the in-container default path is blocked (agent-browser 0.27.1)
+## Why the raw-CDP path existed (agent-browser 0.27.1) — and its resolution
 
-All verified 2026-10-04; drives why this skill uses raw CDP via Node built-ins:
+All three original blockers verified 2026-10-04; **all resolved 2026-10-22** by
+the fleet base-image bump:
 
-1. **glibc**: agent image is Debian 12 (glibc 2.36); the lightpanda binary needs ≥2.38.
-2. **agent-browser 0.27.1 connect-mode silently falls back** to local chromium
+1. **glibc**: agent image is Debian 12 (glibc 2.36); the lightpanda binary needs
+   ≥2.38. Still true — the daemon container remains the only deployment shape,
+   and no in-image install channel exists. (Moot in practice: the client needs
+   only CDP, not the binary.)
+2. **agent-browser 0.27.1 connect-mode silently fell back** to local chromium
    even after a successful WS handshake — proven byte-identical outputs and
-   `HeadlessChrome/154` UA on the "lightpanda" session. Hence rule 5 in SKILL.md:
-   always assert the engine via `navigator.userAgent`.
-3. **0.27.1 spawn-mode is broken** (`AGENT_BROWSER_ENGINE=lightpanda` emits
-   chromium's zygote error), and 0.27.1 is the ceiling: newer versions carry an
-   ARM64 hang (vercel-labs/agent-browser#1671). **Pin 0.27.1; re-probe before any bump.**
+   `HeadlessChrome/154` UA on the "lightpanda" session. **Resolved:** 0.39.1
+   (cli-tools.json pin fleet-wide) performs the remote connect correctly —
+   verified in-container 2026-10-22: `agent-browser --cdp ws://172.17.0.1:9224/`
+   full open→eval cycle against the live daemon. The engine assertion
+   (`eval navigator.userAgent`) stays as standing hygiene.
+3. **0.27.1 spawn-mode was broken**, and 0.27.1 was pinned as the ceiling
+   because newer versions carried an ARM64 hang
+   (vercel-labs/agent-browser#1671). **Resolved:** #1671 does not reproduce on
+   0.39.1 (host-side full CDP e2e + in-container verification, 2026-10-22).
 
-**Revisit triggers:** agent-browser >0.27.1 with #1671 fixed *and* lightpanda
-connect/spawn verified against a live engine; or the agent image moves to a
-glibc ≥2.38 base. Until then the fallback-wrapper pattern (default engine; on
-0-text retry via CDP to lightpanda) stands.
+**Client rule now:** agent-browser ≥0.39.1 CDP mode is the preferred client;
+`cdp-fetch.mjs` (raw CDP, Node built-ins) stays as the zero-dependency fallback
+for flows where agent-browser's proxy env cannot be stripped. First command
+after an engine switch may error once — retry it.
+
+**Revisit triggers (original, closed 2026-10-22):** ~~agent-browser >0.27.1
+with #1671 fixed *and* lightpanda connect/spawn verified against a live
+engine~~ — both verified. The fallback-wrapper pattern (default engine; on
+0-text retry via CDP to lightpanda) is now expressible directly in
+agent-browser without the raw script.
 
 ## Troubleshooting index
 
