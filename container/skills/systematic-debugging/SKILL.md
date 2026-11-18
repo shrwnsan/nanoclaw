@@ -8,6 +8,8 @@ allowed-tools:
   - Grep
   - Glob
   - Bash
+metadata:
+  version: "1.0.0"
 ---
 
 # Systematic Debugging
