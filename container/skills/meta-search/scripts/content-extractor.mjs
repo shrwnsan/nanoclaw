@@ -52,6 +52,7 @@ const JINA_API_KEY = process.env.SEARCH_PLUS_JINA_API_KEY || process.env.JINA_AP
 // an env key — the request goes out unauthenticated and the proxy adds auth.
 const PROXY_AUTH = process.env.METASEARCH_PROXY_AUTH === '1';
 const FIRECRAWL_API_KEY = process.env.SEARCH_PLUS_FIRECRAWL_API_KEY || null;
+const TINYFISH_API_KEY = process.env.SEARCH_PLUS_TINYFISH_API_KEY || process.env.TINYFISH_API_KEY || null;
 
 // Show deprecation warning if using old variables
 if (!process.env.SEARCH_PLUS_TAVILY_API_KEY && process.env.TAVILY_API_KEY) {
@@ -59,6 +60,9 @@ if (!process.env.SEARCH_PLUS_TAVILY_API_KEY && process.env.TAVILY_API_KEY) {
 }
 if (!process.env.SEARCH_PLUS_JINA_API_KEY && process.env.JINA_API_KEY) {
   console.warn('⚠️  JINA_API_KEY is deprecated. Please update to SEARCH_PLUS_JINA_API_KEY');
+}
+if (!process.env.SEARCH_PLUS_TINYFISH_API_KEY && process.env.TINYFISH_API_KEY) {
+  console.warn('⚠️  TINYFISH_API_KEY is deprecated. Please update to SEARCH_PLUS_TINYFISH_API_KEY');
 }
 const TAVILY_EXTRACT_URL = 'https://api.tavily.com/extract';
 const JINA_READER_PUBLIC_URL = 'https://r.jina.ai/';
@@ -525,6 +529,53 @@ async function extractWithFirecrawl(url, options = {}, timeoutMs = 20000) {
       success: false,
       error: { code: extractErrorCode(error.message), message: error.message },
       service: 'firecrawl', url, responseTime: Date.now() - startTime, content: '', contentLength: 0, metadata: {}
+    };
+  }
+}
+
+/**
+ * Keyed extractor: TinyFish Fetch renders the page in a real browser (JS, bot walls),
+ * free within a daily URL allowance. Per-URL failures arrive as HTTP 200 with errors[].
+ */
+async function extractWithTinyfish(url, options = {}, timeoutMs = 20000) {
+  const startTime = Date.now();
+  try {
+    // fork: auth header only when keyed — with METASEARCH_PROXY_AUTH=1 the request
+    // goes out unauthenticated and the proxy (OneCLI) injects credentials.
+    const headers = { 'Content-Type': 'application/json' };
+    if (TINYFISH_API_KEY) {
+      headers['X-API-Key'] = TINYFISH_API_KEY;
+    }
+    const response = await fetch('https://api.fetch.tinyfish.ai', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ urls: [url], format: 'markdown' }),
+      signal: AbortSignal.timeout(timeoutMs)
+    });
+    if (!response.ok) {
+      throw new Error(`TinyFish error: ${response.status} - ${(await response.text()).slice(0, 200)}`);
+    }
+    const data = await response.json();
+    const page = data.results?.[0];
+    if (!page) {
+      const failure = data.errors?.[0];
+      throw new Error(`TinyFish error: ${failure ? `${failure.error}${failure.status ? ` (${failure.status})` : ''}` : 'no result'}`);
+    }
+    const content = typeof page.text === 'string' ? page.text : '';
+    return {
+      success: true,
+      content,
+      contentLength: content.length,
+      service: 'tinyfish',
+      url,
+      responseTime: Date.now() - startTime,
+      metadata: { title: page.title || null }
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: { code: extractErrorCode(error.message), message: error.message },
+      service: 'tinyfish', url, responseTime: Date.now() - startTime, content: '', contentLength: 0, metadata: {}
     };
   }
 }
@@ -1138,14 +1189,17 @@ async function validateAndNormalizeURL(url) {
   }
 
 
-  // Check for obviously problematic domains that would cause API failures
+  // Check for obviously problematic domains that would cause API failures.
+  // Text-shape heuristics run against the full URL; the malformed-TLD shape is
+  // a hostname property, so it runs against the hostname only (#87): a ".com."
+  // inside a query string is not a malformed TLD, and 2-letter ccTLDs such as
+  // .com.hk / .com.au are valid registrations. Reserved example.com/net/org is
+  // already rejected by hostname above.
   const problematicPatterns = [
     /textise dot iitty/i,
     /textise\.iitty/i,  // The normalized version is still invalid
     /example dot com/i,
-    /example\.com$/i,  // Generic example domain
     /test dot /i,
-    /\.com\.[a-z]/i,  // Likely malformed TLD
     /r\.jina\.ai\/http:\/\/[^/]*\.[a-z]{2,}\/?$/i  // Jina AI with obviously fake domain
   ];
 
@@ -1154,6 +1208,10 @@ async function validateAndNormalizeURL(url) {
       issues.push('suspicious_domain_pattern');
       break;
     }
+  }
+
+  if (!issues.includes('suspicious_domain_pattern') && /\.com\.[a-z]{3,}/i.test(hostname)) {
+    issues.push('suspicious_domain_pattern');  // Likely malformed TLD (example.com.bad)
   }
 
   // If we have suspicious patterns that can't be trusted, mark as invalid
@@ -1493,8 +1551,13 @@ export async function extractContent(url, options = {}) {
     }
   }
 
-  // Keyless fallbacks on independent infrastructure: Firecrawl, then Defuddle
-  for (const [name, extractor] of [['firecrawl', extractWithFirecrawl], ['defuddle', extractWithDefuddle]]) {
+  // Fallbacks on independent infrastructure: TinyFish (keyed or proxy-auth), then keyless Firecrawl and Defuddle
+  const independentExtractors = [
+    ...(TINYFISH_API_KEY || PROXY_AUTH ? [['tinyfish', extractWithTinyfish]] : []), // fork: proxy auth
+    ['firecrawl', extractWithFirecrawl],
+    ['defuddle', extractWithDefuddle]
+  ];
+  for (const [name, extractor] of independentExtractors) {
     if (result.success && result.contentLength > 0) break;
     log(`🔄 Trying ${name}...`);
     const freeResult = rejectHardContentFailure(await extractor(extractionURL, options));

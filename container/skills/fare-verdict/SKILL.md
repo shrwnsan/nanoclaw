@@ -4,6 +4,8 @@ description: Advisory flight-fare verdict for a route and date from Google Fligh
 allowed-tools:
   - Bash(node *)
   - Bash(agent-browser *)
+metadata:
+  version: "1.0.0"
 ---
 
 # Fare Verdict
